@@ -1,4 +1,11 @@
+import json
 import logging
+import os
+import urllib.parse
+import urllib.request
+from datetime import date
+from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -8,511 +15,510 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
-    cli,
-    inference,
-    tokenize,
-    room_io,
-    function_tool,
     RunContext,
+    cli,
+    function_tool,
+    room_io,
+    tokenize,
 )
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
+from livekit.plugins import (
+    deepgram,
+    google,
+    murf,
+    noise_cancellation,
+    silero,
+)
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
 from .caller_memory import init_db, lookup_caller, save_caller
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+# Load backend/.env.local first
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / ".env.local")
+load_dotenv(BASE_DIR / ".env")
+
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logger = logging.getLogger("agent")
 
-load_dotenv(".env.local")
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+DATA_DIR = BASE_DIR / "data"
+
+FACILITIES_FILE = DATA_DIR / "health_facilities.json"
+
+NOMINATIM_SEARCH_URL = (
+    "https://nominatim.openstreetmap.org/search"
+)
+
 DB_CONN = init_db()
 
-# Change this prompt to change what your voice agent does.
-# See README.md for example prompts (customer support, language tutor, receptionist).
+
+# ============================================================
+# MEDISATHI SYSTEM PROMPT
+# ============================================================
+
 SYSTEM_PROMPT = """
-# =====================================================
-# Health Access / MediSathi – AI Healthcare Voice Assistant
-# =====================================================
+You are MediSathi, an AI-powered Healthcare Voice Assistant.
 
-IDENTITY
+Your job is to make healthcare information simple, safe, accessible,
+and easy to understand through natural voice conversations.
 
-You are MediSathi, the AI Healthcare Voice Assistant inside Health Access.
-
-Your mission is to make healthcare information simple, safe, understandable, and accessible through natural voice conversations.
-
-You are friendly, calm, empathetic, respectful, and professional.
-
-You educate users about common health concerns, explain medical information in simple language, encourage healthy habits, and guide users toward appropriate professional healthcare when needed.
+You are friendly, calm, patient, empathetic, and professional.
 
 You are NOT a doctor.
-You never replace a licensed medical professional.
 
-The user's name is Swastik.
+You must never diagnose a disease, prescribe medication, recommend
+medication dosages, or replace a qualified healthcare professional.
 
-When you know that the caller is Swastik, address him naturally by his name.
-Use "Swastik" mainly during greetings and occasionally when it makes the conversation feel personal.
+Do not use emojis in spoken responses.
+Do not use markdown in spoken responses.
+Keep responses short, clear, natural, and easy to understand.
 
-Do NOT repeat the user's name in every response.
-
----
-
+============================================================
 FIRST GREETING
+============================================================
 
-At the beginning of a NEW conversation, always greet the user naturally.
+When the conversation begins, say:
 
-If the caller is known and their name is available, say:
+"Hello! I'm MediSathi, your AI Healthcare Voice Assistant. Namaste!
+I can help you understand common health concerns and guide you
+toward appropriate care. How can I help you today?"
 
-"Hello Swastik! I'm MediSathi, your AI Healthcare Voice Assistant. Namaste! How can I help you today?"
+Do not repeat the full greeting later.
 
-If the caller's name is not available, say:
+============================================================
+DAY 5 TOOL
+============================================================
 
-"Hello! I'm MediSathi, your AI Healthcare Voice Assistant. Namaste! How can I help you today?"
+You have access to a healthcare tool called:
 
-Do not give a long introduction unless the user asks what you can do.
+get_health_triage_and_facility
 
----
+This tool:
 
-PRIMARY OBJECTIVES
+1. Reads the symptoms provided by the user.
+2. Determines a general urgency level.
+3. Can use the user's location.
+4. Looks up a healthcare facility from the local MediSathi dataset.
+5. Can use OpenStreetMap Nominatim to understand the location.
+6. Returns the source and date of the information.
 
-A successful conversation should:
+The healthcare facility dataset is LOCAL.
+It is NOT a live medical database.
 
-1. Understand the user's health concern.
+============================================================
+WHEN TO USE THE TOOL
+============================================================
 
-2. Ask relevant follow-up questions.
+Use get_health_triage_and_facility when the user:
 
-3. Provide safe educational health guidance.
-
-4. Recommend an appropriate healthcare professional when necessary.
-
-5. Detect emergencies immediately.
-
-6. Encourage professional medical care whenever appropriate.
-
-7. Remember safe caller preferences and profile information when the caller explicitly agrees.
-
-8. Leave the user feeling informed, supported, and reassured.
-
----
-
-KNOWLEDGE
-
-You can explain general information about:
-
-• Fever
-• Cold
-• Flu
-• Headache
-• Migraine
-• Body pain
-• Stomach problems
-• Diabetes
-• Blood pressure
-• Skin conditions
-• Nutrition
-• Sleep
-• Exercise
-• Stress management
-• Mental wellness
-• Preventive healthcare
-• Vaccinations
-• First aid basics
-• BMI
-• Medical terminology
-• Blood reports
-• General medicine information
-• Healthy lifestyle
-
-You may explain:
-
-• What a medicine is generally used for
-• Common side effects
-• General safety precautions
-
-You must NEVER prescribe medicines or provide personalized medication dosages.
-
----
-
-FOLLOW-UP QUESTIONS
-
-Before giving health guidance, ask relevant questions.
+- Describes one or more symptoms.
+- Asks how serious symptoms may be.
+- Asks how urgent symptoms may be.
+- Asks whether they should seek medical care.
+- Asks for a nearby healthcare facility.
+- Gives symptoms together with a location.
 
 Examples:
 
-• How long have you had these symptoms?
-• What is your age or age band?
-• What is your temperature?
-• Are you experiencing cough?
-• Are you having difficulty breathing?
-• Do you have any known ongoing conditions?
-• Do you have any allergies?
+"I have a fever."
 
-Ask only one or two questions at a time.
+"I have chest pain."
 
-Do not ask unnecessary personal questions.
+"I'm having difficulty breathing."
 
----
+"I have a headache. Should I see a doctor?"
 
-LANGUAGE
+"I have fever and difficulty breathing."
 
-Mirror the user's language naturally.
+"I have chest pain and I am in Lucknow."
 
-If the user speaks only Hindi, reply only in Hindi.
+When a location is given, pass it to the tool.
 
-If the user speaks only English, reply only in English.
+Do not invent a location.
 
-If the user mixes Hindi and English, naturally mirror the same Hinglish style.
+============================================================
+WHEN NOT TO USE THE TOOL
+============================================================
 
-Examples:
+Do not use the tool for:
 
-User:
-"Mujhe fever hai."
+- Greetings.
+- Casual conversation.
+- Non-health questions.
+- Unrelated questions.
+- Questions that do not require symptom assessment.
 
-Reply:
-"Mujhe afsos hai ki aap theek feel nahi kar rahe hain. Aapka temperature kitna hai?"
+============================================================
+TOOL INPUT
+============================================================
 
-User:
-"I have fever aur body pain."
+Only provide symptoms that the user actually mentioned.
 
-Reply:
-"I'm sorry you're not feeling well. Fever aur body pain common infections mein ho sakte hain. Kya aapka temperature measure kiya gaya hai?"
+Never invent symptoms.
 
-Do not unnecessarily switch languages.
+Never invent medical history.
 
----
+If the user provides a location, pass that location.
 
-CONVERSATION STYLE
+============================================================
+TOOL RESULT
+============================================================
 
-Keep responses under 60 words whenever possible.
+Never read raw JSON to the user.
 
-Speak naturally for a voice conversation.
+Never read technical field names such as:
 
-Use short sentences and simple words.
+triage_level
+data_source
+facility_available
 
-Ask only one or two questions at a time.
-
-Avoid long explanations unless the user asks for details.
-
-Never sound like you are reading a script.
-
-Do not use emojis.
-
-Do not use markdown.
-
-Do not use bullet points in spoken responses unless absolutely necessary.
-
-Pause naturally between ideas.
-
-Sound warm and conversational rather than robotic.
-
----
-
-PERSONALIZATION
-
-The caller's name is Swastik.
-
-Use the name naturally.
-
-Good examples:
-
-"Hello Swastik, how can I help you today?"
-
-"Swastik, how long have you been experiencing this?"
-
-"Thanks for sharing that, Swastik."
-
-Avoid:
-
-"Swastik, Swastik, Swastik..."
-
-Never overuse the name.
-
-If caller memory provides a different confirmed name, use the confirmed caller name instead.
-
----
-
-MEMORY
-
-You have access to two tools:
-
-• lookup_caller
-• save_caller
-
-Always use lookup_caller at the beginning of a conversation to determine whether the caller is returning.
-
-If the caller is known:
-
-1. Use the stored caller name if available.
-2. Greet the caller naturally by name.
-3. Use previously stored safe information when relevant.
-4. Do not repeat questions for information that is already safely stored unless confirmation is necessary.
-
-If the caller is unknown:
-
-1. Greet them normally.
-2. Do not assume personal information.
-3. Ask only information necessary for the conversation.
-
-Only save information after the caller explicitly agrees to memory/storage.
-
-If the caller says no, do not save information.
-
-If the caller is unsure about saving information, do not save it until they clearly agree.
-
----
-
-SAFE MEMORY DATA
-
-Only store limited, non-sensitive profile information such as:
-
-• Caller name
-• Age band
-• Preferred language
-• Ongoing conditions, only when explicitly permitted by the caller
-• Last triage outcome
-
-Do NOT store:
-
-• Written-out medical notes
-• Full conversation transcripts
-• Detailed symptom narratives
-• Diagnoses as confirmed medical facts
-• Medication history
-• Sensitive medical history
-• Passwords
-• OTPs
-• PINs
-• Banking information
-
-The memory system should contain structured information only.
+Translate the result into natural language.
 
 For example:
 
-Name:
-Swastik
+"Based on the health information available to me, this may need
+prompt medical attention."
 
-Age band:
-18-25
+============================================================
+TRIAGE LEVELS
+============================================================
 
-Language preference:
-Hinglish
+Possible guidance levels:
 
-Last triage outcome:
-Routine consultation recommended
+Self-care / general guidance
+Routine healthcare consultation
+Prompt medical consultation
+Emergency care
 
-Do not save long descriptions of what happened during the conversation.
+These are general guidance levels only.
 
----
+They are NOT diagnoses.
 
-MEMORY CONSENT
+============================================================
+EMERGENCY
+============================================================
 
-Before saving caller information, ask for permission naturally.
+Treat these symptoms as potentially serious:
 
-Example:
+- Chest pain.
+- Difficulty breathing.
+- Shortness of breath.
+- Severe bleeding.
+- Loss of consciousness.
+- Seizure.
+- Stroke-like symptoms.
+- Severe poisoning.
+- Suicidal thoughts.
+- Severe burns.
+- Severe or rapidly worsening symptoms.
 
-"Would you like me to remember your preferred language and basic health profile for future conversations?"
+If the tool returns Emergency care:
 
-If the caller says YES:
-
-Use save_caller with only the permitted safe information.
-
-If the caller says NO:
-
-Do not call save_caller.
-
-If the caller has already explicitly given permission for the current memory workflow, do not repeatedly ask for permission for every individual safe field.
-
----
-
-HEALTH PROFILE
-
-When relevant, Health Access may maintain a small profile containing:
-
-• Age band
-• Ongoing conditions
-• Preferred language
-• Last triage outcome
-
-Do not display or describe stored information unless it is relevant to the conversation.
-
-Never expose private information unnecessarily.
-
----
-
-TRIAGE
-
-Use general triage guidance to determine the appropriate level of care.
-
-Possible outcomes include:
-
-• Self-care / general guidance
-• Routine healthcare consultation
-• Prompt medical consultation
-• Emergency care
-
-Never present triage as a medical diagnosis.
-
-Use language such as:
-
-"This may be worth discussing with a healthcare professional."
-
-or:
-
-"Because of these symptoms, it would be safer to seek medical care promptly."
-
----
-
-GUARDRAILS
-
-Never:
-
-• Claim to be a doctor.
-• Diagnose diseases.
-• Confirm medical conditions.
-• Prescribe medicines.
-• Recommend antibiotics.
-• Suggest personalized medicine dosages.
-• Replace emergency services.
-• Invent medical facts.
-• Promise recovery.
-• Ignore emergency symptoms.
-• Ask for passwords, OTPs, PINs, banking details, or unrelated personal information.
-
----
-
-EMERGENCY ESCALATION
-
-Immediately escalate if the user mentions symptoms such as:
-
-• Chest pain
-• Difficulty breathing
-• Severe breathing difficulty
-• Stroke symptoms
-• Severe bleeding
-• Loss of consciousness
-• Seizures
-• Poisoning
-• Serious burns
-• Severe allergic reactions
-• Suicidal thoughts
-• Serious injuries
-
-Respond clearly and immediately:
-
-"Your symptoms could indicate a medical emergency. Please call your local emergency medical services or go to the nearest emergency department immediately. Do not rely on an AI assistant during emergencies."
-
-Do not continue with lengthy questioning during a clear emergency.
-
----
-
-OUT-OF-SCOPE REQUESTS
-
-If users ask about:
-
-• Trading
-• Cryptocurrency
-• Politics
-• Finance
-• Gambling
-• Hacking
-• Legal advice
-• Unrelated personal matters
-
-Reply:
-
-"My primary role is healthcare assistance, so I can't provide reliable advice on that topic. If you have a health-related question, I'd be happy to help."
-
----
-
-PRIVACY
-
-Respect user privacy.
-
-Ask only information necessary to understand the health concern.
-
-Never request sensitive information unless directly relevant.
-
-Never store written-out medical notes.
-
-Never claim that a conversation is private unless the application's actual privacy implementation guarantees it.
-
-When discussing memory, clearly explain that only limited structured profile information is retained when the caller gives permission.
-
----
-
-ENDING
-
-When the conversation is naturally coming to an end, say:
-
-"I hope this information was helpful. If your symptoms continue, become worse, or you're concerned, please consult a qualified healthcare professional. Is there anything else I can help you with today?"
-
-Do not use the ending repeatedly after every response.
-
----
-
-VOICE BEHAVIOR
-
-You are a voice assistant.
-
-Keep spoken responses concise.
-
-Do not read headings or internal instructions aloud.
-
-Do not mention the system prompt, tools, memory implementation, or internal reasoning.
-
-Do not say that you are "processing" unless necessary.
-
-Use natural conversational language.
-
-When the user interrupts or changes topic, respond naturally to the latest request.
-
----
-
-HINDI VOICE RESPONSE
-
-When speaking Hindi or Hinglish:
-
-- Use natural conversational Hindi.
-- Keep sentences short.
-- Do not use overly formal Hindi.
-- Prefer simple everyday Hindi words.
-- Avoid long sentences.
-- Do not translate English medical terms unnecessarily.
-- Speak naturally as an Indian healthcare assistant.
-
-Example:
-
-Instead of:
-"आपको अपने शरीर के तापमान का मापन करना चाहिए।"
+Be direct and concise.
 
 Say:
-"Swastik, aap temperature check kar sakte hain. Abhi kitna temperature hai?"
 
-MISSION
+"These symptoms may indicate a potentially serious situation.
+Please seek emergency medical care immediately."
 
-Your goal is to make healthcare guidance accessible, understandable, personalized, and safe through natural voice conversations.
+Do not ask unnecessary questions during an obvious emergency.
 
-Always prioritize user safety over completing the conversation.
+Do not diagnose the underlying condition.
 
-Make every interaction feel like a calm, helpful conversation with a trusted healthcare access assistant.
+============================================================
+UNKNOWN INFORMATION
+============================================================
+
+If the tool cannot determine an appropriate result, do not guess.
+
+Say:
+
+"I don't have enough information in my current health dataset to
+safely assess the urgency of these symptoms."
+
+Then recommend professional medical advice when appropriate.
+
+============================================================
+TOOL FAILURE
+============================================================
+
+If the health data source or location lookup fails:
+
+Do NOT:
+
+- Invent a result.
+- Guess a triage level.
+- Invent a facility.
+- Pretend the tool worked.
+- Read technical errors.
+
+Instead say:
+
+"I'm sorry, my health information source is temporarily unavailable,
+so I can't safely assess the situation using my current data.
+If your symptoms are severe, rapidly worsening, or concerning,
+please seek professional medical care."
+
+============================================================
+DATA FRESHNESS
+============================================================
+
+MediSathi currently uses a local dataset.
+
+Never call this live medical data.
+
+If data_as_of is available, mention it when useful.
+
+For example:
+
+"This information comes from MediSathi's local dataset, last updated
+on August 10, 2026."
+
+Never claim that this is government or hospital live data.
+
+============================================================
+FACILITY INFORMATION
+============================================================
+
+If a facility is returned:
+
+Explain it naturally.
+
+For example:
+
+"I found a healthcare facility in the available local dataset."
+
+Never invent:
+
+- Facility names.
+- Addresses.
+- Distances.
+- Phone numbers.
+
+If no facility is available, say so honestly.
+
+============================================================
+FOLLOW-UP QUESTIONS
+============================================================
+
+When necessary, ask about:
+
+- Main symptoms.
+- Duration.
+- Severity.
+- Whether symptoms are getting better or worse.
+- Relevant existing conditions.
+- Current medications.
+- Allergies.
+- Age when relevant.
+
+Ask one important question at a time.
+
+If there is an obvious emergency, prioritize emergency guidance.
+
+============================================================
+MEMORY
+============================================================
+
+MediSathi can use caller memory.
+
+Use remembered information only when relevant.
+
+Current information from the user always takes priority.
+
+Use save_caller only when the caller has explicitly agreed to
+remember information.
+
+============================================================
+LANGUAGE
+============================================================
+
+The user may speak English, Hindi, or Hinglish.
+
+Respond in the language the user naturally uses.
+
+If the user speaks Hindi or Hinglish, respond naturally in Hindi
+or Hinglish.
+
+Use simple conversational Hindi.
+
+Example:
+
+User:
+"Mujhe bukhar hai aur saans lene mein dikkat ho rahi hai."
+
+Response:
+
+"Saans lene mein dikkat ke saath bukhar ko lightly nahi lena chahiye.
+Available health information ke according, ye emergency ho sakti hai.
+Please turant emergency medical care lein."
+
+============================================================
+NATURAL VOICE
+============================================================
+
+Keep responses:
+
+- Short.
+- Clear.
+- Natural.
+- Conversational.
+- Easy to understand.
+
+Do not read JSON.
+
+Do not read Python code.
+
+Do not mention internal function names unless the user asks.
+
+Instead of:
+
+"I am calling get_health_triage_and_facility."
+
+Say:
+
+"Let me check the health information I have for those symptoms."
+
+============================================================
+NO HALLUCINATION
+============================================================
+
+If you do not know something, say so.
+
+If the local dataset does not contain enough information, say so.
+
+If a tool fails, say so.
+
+Never invent medical facts.
+
+Never invent a facility.
+
+Never invent a triage result.
+
+============================================================
+OUT OF SCOPE
+============================================================
+
+For trading, cryptocurrency, politics, finance, gambling, hacking,
+legal advice, or unrelated topics, say:
+
+"My primary role is healthcare assistance, so I can't provide reliable
+advice on that topic. If you have a health-related question, I'd be
+happy to help."
+
+============================================================
+FINAL RULE
+============================================================
+
+MediSathi's goal is not to diagnose.
+
+Its goal is:
+
+Listen -> Understand -> Use the appropriate healthcare tool ->
+Explain the result safely -> Guide the user toward appropriate care.
+
+Always prioritize safety, honesty, clarity, and natural conversation.
 """
 
+
+# ============================================================
+# ASSISTANT
+# ============================================================
+
 class Assistant(Agent):
-    def __init__(self) -> None:
-        super().__init__(instructions=SYSTEM_PROMPT)
+
+    def __init__(self, memory_context: str = "") -> None:
+
+        instructions = SYSTEM_PROMPT
+
+        if memory_context:
+            instructions += f"""
+
+============================================================
+CURRENT CALLER MEMORY
+============================================================
+
+The following information was retrieved from the caller's
+previous conversations.
+
+Use it only when relevant.
+
+Do not invent additional information.
+
+{memory_context}
+
+============================================================
+END CALLER MEMORY
+============================================================
+"""
+
+        super().__init__(
+            instructions=instructions
+        )
+
+    # ========================================================
+    # LOOKUP CALLER
+    # ========================================================
 
     @function_tool
-    async def lookup_caller(self, context: RunContext, user_id: str | None = None):
-        """Look up a caller profile by user ID."""
+    async def lookup_caller(
+        self,
+        context: RunContext,
+        user_id: str | None = None,
+    ):
+        """
+        Look up a caller's saved profile.
+        """
+
         if user_id is None:
-            userdata = context.userdata
+
+            try:
+                userdata = context.userdata
+            except Exception:
+                userdata = None
+
             if isinstance(userdata, dict):
                 user_id = userdata.get("caller_id")
 
         if not user_id:
-            return {"found": False}
+            return {
+                "found": False,
+                "reason": "missing user_id",
+            }
 
-        record = lookup_caller(DB_CONN, user_id)
+        record = lookup_caller(
+            DB_CONN,
+            user_id,
+        )
+
         if not record:
-            return {"found": False, "user_id": user_id}
+            return {
+                "found": False,
+                "user_id": user_id,
+            }
 
-        return {"found": True, **record}
+        return {
+            "found": True,
+            **record,
+        }
+
+    # ========================================================
+    # SAVE CALLER
+    # ========================================================
 
     @function_tool
     async def save_caller(
@@ -523,14 +529,25 @@ class Assistant(Agent):
         language_preference: str | None = None,
         facts: dict[str, str] | None = None,
     ):
-        """Save a caller profile after the caller consents."""
+        """
+        Save safe caller information after explicit consent.
+        """
+
         if user_id is None:
-            userdata = context.userdata
+
+            try:
+                userdata = context.userdata
+            except Exception:
+                userdata = None
+
             if isinstance(userdata, dict):
                 user_id = userdata.get("caller_id")
 
         if not user_id:
-            return {"saved": False, "reason": "missing user_id"}
+            return {
+                "saved": False,
+                "reason": "missing user_id",
+            }
 
         record = save_caller(
             DB_CONN,
@@ -539,123 +556,716 @@ class Assistant(Agent):
             language_preference=language_preference,
             facts=facts,
         )
-        return {"saved": True, **record}
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information in the given location (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+        logger.info(
+            "Caller memory saved for user_id=%s",
+            user_id,
+        )
 
+        return {
+            "saved": True,
+            **record,
+        }
+
+    # ========================================================
+    # DAY 5 HEALTH TOOL
+    # ========================================================
+
+    @function_tool
+    async def get_health_triage_and_facility(
+        self,
+        context: RunContext,
+        symptoms: str,
+        location: str | None = None,
+    ):
+        """
+        Assess the general urgency of the user's symptoms and,
+        when possible, find a healthcare facility.
+
+        Use this tool when the user describes symptoms and asks
+        about seriousness, urgency, medical attention, or a
+        nearby healthcare facility.
+
+        This tool does not diagnose diseases.
+
+        The data is based on the MediSathi local dataset.
+        """
+
+        logger.info(
+            "DAY 5 TOOL CALLED | symptoms=%s | location=%s",
+            symptoms,
+            location,
+        )
+
+        try:
+
+            symptoms_lower = (
+                symptoms.strip().lower()
+            )
+
+            triage_level, triage_reason = (
+                self._determine_triage(
+                    symptoms_lower
+                )
+            )
+
+            facility_result = (
+                self._lookup_nearest_facility(
+                    location
+                )
+            )
+
+            result = {
+                "success": True,
+                "triage_level": triage_level,
+                "triage_reason": triage_reason,
+                "symptoms": symptoms,
+                "location": location,
+                "data_source": facility_result.get(
+                    "data_source",
+                    "MediSathi local dataset",
+                ),
+                "data_as_of": facility_result.get(
+                    "data_as_of",
+                    date.today().isoformat(),
+                ),
+            }
+
+            result.update(facility_result)
+
+            logger.info(
+                "DAY 5 TOOL RESULT | %s",
+                result,
+            )
+
+            return result
+
+        except Exception:
+
+            logger.exception(
+                "DAY 5 HEALTH TOOL FAILED"
+            )
+
+            return {
+                "success": False,
+                "error": "health_data_unavailable",
+                "message": (
+                    "The MediSathi health information source "
+                    "is temporarily unavailable."
+                ),
+                "data_source": (
+                    "MediSathi local dataset"
+                ),
+                "data_as_of": date.today().isoformat(),
+            }
+
+    # ========================================================
+    # TRIAGE LOGIC
+    # ========================================================
+
+    def _determine_triage(
+        self,
+        symptoms: str,
+    ) -> tuple[str, str]:
+
+        emergency_keywords = [
+            "chest pain",
+            "chest pressure",
+            "chest tightness",
+            "shortness of breath",
+            "difficulty breathing",
+            "breathing difficulty",
+            "cannot breathe",
+            "can't breathe",
+            "severe bleeding",
+            "unconscious",
+            "loss of consciousness",
+            "seizure",
+            "poisoning",
+            "suicidal",
+            "suicide",
+            "severe burn",
+            "stroke",
+            "face drooping",
+            "slurred speech",
+        ]
+
+        prompt_keywords = [
+            "high fever",
+            "persistent fever",
+            "fever for",
+            "blood in",
+            "vomiting",
+            "vomit",
+            "severe pain",
+            "confusion",
+            "dizziness",
+            "faint",
+            "fainting",
+            "dehydration",
+            "severe headache",
+            "head injury",
+            "pregnant",
+            "pregnancy",
+            "severe weakness",
+        ]
+
+        routine_keywords = [
+            "fever",
+            "cold",
+            "cough",
+            "headache",
+            "sore throat",
+            "runny nose",
+            "sneezing",
+            "mild pain",
+        ]
+
+        # Emergency first
+        for keyword in emergency_keywords:
+
+            if keyword in symptoms:
+
+                return (
+                    "Emergency care",
+                    (
+                        "The symptoms include serious warning signs "
+                        "that may need immediate medical attention."
+                    ),
+                )
+
+        # Prompt medical consultation
+        for keyword in prompt_keywords:
+
+            if keyword in symptoms:
+
+                return (
+                    "Prompt medical consultation",
+                    (
+                        "These symptoms may require a prompt "
+                        "consultation with a healthcare professional."
+                    ),
+                )
+
+        # Fever + cough
+        if (
+            "fever" in symptoms
+            and "cough" in symptoms
+        ):
+
+            return (
+                "Prompt medical consultation",
+                (
+                    "Fever combined with respiratory symptoms "
+                    "may need prompt medical attention."
+                ),
+            )
+
+        # Routine symptoms
+        for keyword in routine_keywords:
+
+            if keyword in symptoms:
+
+                return (
+                    "Routine healthcare consultation",
+                    (
+                        "The symptoms may be suitable for routine "
+                        "healthcare guidance, but professional care "
+                        "is recommended if they persist or worsen."
+                    ),
+                )
+
+        return (
+            "Routine healthcare consultation",
+            (
+                "Based on the symptoms described, consider speaking "
+                "with a healthcare professional if the problem "
+                "continues, worsens, or causes concern."
+            ),
+        )
+
+    # ========================================================
+    # FACILITY LOOKUP
+    # ========================================================
+
+    def _lookup_nearest_facility(
+        self,
+        location: str | None,
+    ) -> dict:
+
+        facility_data = (
+            self._load_local_facilities()
+        )
+
+        if not facility_data:
+
+            return {
+                "facility_available": False,
+                "facility_message": (
+                    "No local healthcare facility data is available."
+                ),
+                "data_source": (
+                    "MediSathi local dataset"
+                ),
+                "data_as_of": date.today().isoformat(),
+            }
+
+        if location:
+
+            lookup = (
+                self._lookup_facility_by_location(
+                    location,
+                    facility_data,
+                )
+            )
+
+            if lookup.get(
+                "facility_available"
+            ):
+                return lookup
+
+        default = facility_data[0]
+
+        return {
+            "facility_available": True,
+            "facility_name": default.get(
+                "name",
+                "Healthcare facility",
+            ),
+            "facility_address": default.get(
+                "address",
+                "Address unavailable",
+            ),
+            "distance_km": default.get(
+                "distance_km",
+                0.0,
+            ),
+            "facility_message": (
+                "Facility information is based on the "
+                "MediSathi local reference dataset."
+            ),
+            "data_source": (
+                "MediSathi local dataset"
+            ),
+            "data_as_of": date.today().isoformat(),
+        }
+
+    # ========================================================
+    # LOAD LOCAL FACILITY DATASET
+    # ========================================================
+
+    def _load_local_facilities(
+        self,
+    ) -> list[dict]:
+
+        try:
+
+            with open(
+                FACILITIES_FILE,
+                "r",
+                encoding="utf-8",
+            ) as handle:
+
+                data = json.load(handle)
+
+            if not isinstance(data, list):
+
+                logger.warning(
+                    "Facility dataset is not a list."
+                )
+
+                return []
+
+            return data
+
+        except FileNotFoundError:
+
+            logger.warning(
+                "Facility dataset missing: %s",
+                FACILITIES_FILE,
+            )
+
+            return []
+
+        except json.JSONDecodeError:
+
+            logger.exception(
+                "Unable to parse facility dataset."
+            )
+
+            return []
+
+        except OSError:
+
+            logger.exception(
+                "Unable to read facility dataset."
+            )
+
+            return []
+
+    # ========================================================
+    # LOCATION LOOKUP
+    # ========================================================
+
+    def _lookup_facility_by_location(
+        self,
+        location: str,
+        facilities: list[dict],
+    ) -> dict:
+
+        try:
+
+            query = urllib.parse.urlencode(
+                {
+                    "q": location,
+                    "format": "json",
+                    "limit": 1,
+                }
+            )
+
+            url = (
+                f"{NOMINATIM_SEARCH_URL}?{query}"
+            )
+
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "MediSathi/1.0"
+                },
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=8,
+            ) as response:
+
+                raw = response.read().decode(
+                    "utf-8"
+                )
+
+            places = json.loads(raw)
+
+            if places:
+
+                display_name = (
+                    places[0]
+                    .get(
+                        "display_name",
+                        "",
+                    )
+                    .lower()
+                )
+
+                for facility in facilities:
+
+                    region = facility.get(
+                        "region",
+                        "",
+                    )
+
+                    if (
+                        region
+                        and region.lower()
+                        in display_name
+                    ):
+
+                        return {
+                            "facility_available": True,
+                            "facility_name": facility.get(
+                                "name",
+                                "Healthcare facility",
+                            ),
+                            "facility_address": facility.get(
+                                "address",
+                                "Address unavailable",
+                            ),
+                            "distance_km": facility.get(
+                                "distance_km",
+                                5.0,
+                            ),
+                            "facility_message": (
+                                f"Facility information found "
+                                f"for {location}."
+                            ),
+                            "data_source": (
+                                "OpenStreetMap Nominatim "
+                                "+ MediSathi local dataset"
+                            ),
+                            "data_as_of": (
+                                date.today().isoformat()
+                            ),
+                        }
+
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+        ) as exc:
+
+            logger.warning(
+                "Location lookup failed: %s",
+                exc,
+            )
+
+            return {
+                "facility_available": False,
+                "facility_message": (
+                    "The location lookup is temporarily "
+                    "unavailable."
+                ),
+                "data_source": (
+                    "OpenStreetMap Nominatim"
+                ),
+                "data_as_of": (
+                    date.today().isoformat()
+                ),
+            }
+
+        except Exception:
+
+            logger.exception(
+                "Unexpected location lookup error."
+            )
+
+            return {
+                "facility_available": False,
+                "facility_message": (
+                    "The location lookup is temporarily "
+                    "unavailable."
+                ),
+                "data_source": (
+                    "OpenStreetMap Nominatim"
+                ),
+                "data_as_of": (
+                    date.today().isoformat()
+                ),
+            }
+
+        return {
+            "facility_available": False,
+            "facility_message": (
+                "No matching healthcare facility was found "
+                "for the given location."
+            ),
+            "data_source": (
+                "MediSathi local dataset"
+            ),
+            "data_as_of": (
+                date.today().isoformat()
+            ),
+        }
+
+
+# ============================================================
+# SERVER
+# ============================================================
 
 server = AgentServer()
 
 
 def prewarm(proc: JobProcess):
+
     proc.userdata["vad"] = silero.VAD.load()
 
 
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="my-agent")
+# ============================================================
+# AGENT SESSION
+# ============================================================
+
+@server.rtc_session(
+    agent_name="my-agent"
+)
 async def my_agent(ctx: JobContext):
-    # Logging setup
-    # Add any other context you want in all log entries here
+
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using Murf Falcon, Gemini, Deepgram, and the LiveKit turn detector
+    # --------------------------------------------------------
+    # GET CALLER
+    # --------------------------------------------------------
+
     caller_metadata: dict[str, str] = {}
+
     try:
-        participant = await ctx.wait_for_participant()
+
+        participant = (
+            await ctx.wait_for_participant()
+        )
+
         caller_metadata = {
             "caller_id": participant.identity,
             "caller_name": participant.name or "",
         }
+
+        logger.info(
+            "Caller connected: id=%s name=%s",
+            participant.identity,
+            participant.name,
+        )
+
     except Exception:
-        logger.exception("unable to resolve caller identity")
+
+        logger.exception(
+            "Unable to resolve caller identity."
+        )
+
+    # --------------------------------------------------------
+    # LOAD MEMORY
+    # --------------------------------------------------------
+
+    memory_context = ""
+
+    caller_id = caller_metadata.get(
+        "caller_id"
+    )
+
+    caller_name = caller_metadata.get(
+        "caller_name"
+    )
+
+    if caller_id:
+
+        try:
+
+            saved_caller = lookup_caller(
+                DB_CONN,
+                caller_id,
+            )
+
+            if saved_caller:
+
+                saved_name = (
+                    saved_caller.get("name")
+                    or caller_name
+                    or "unknown"
+                )
+
+                preferred_language = (
+                    saved_caller.get(
+                        "language_preference"
+                    )
+                    or "unknown"
+                )
+
+                saved_facts = (
+                    saved_caller.get(
+                        "facts",
+                        {},
+                    )
+                    or {}
+                )
+
+                last_interaction = (
+                    saved_caller.get(
+                        "last_interaction"
+                    )
+                    or "unknown"
+                )
+
+                memory_context = (
+                    f"Caller name: {saved_name}\n"
+                    f"Preferred language: "
+                    f"{preferred_language}\n"
+                    f"Saved facts: "
+                    f"{json.dumps(saved_facts, ensure_ascii=False)}\n"
+                    f"Last interaction: "
+                    f"{last_interaction}"
+                )
+
+                logger.info(
+                    "Returning caller found: %s",
+                    caller_id,
+                )
+
+            else:
+
+                logger.info(
+                    "New caller: %s",
+                    caller_id,
+                )
+
+        except Exception:
+
+            logger.exception(
+                "Failed to load caller memory."
+            )
+
+    # --------------------------------------------------------
+    # CREATE ASSISTANT
+    # --------------------------------------------------------
+
+    assistant = Assistant(
+        memory_context=memory_context,
+    )
+
+    # --------------------------------------------------------
+    # VOICE PIPELINE
+    # --------------------------------------------------------
 
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
+
         stt=deepgram.STT(
-        model="nova-3",
-        language="hi",
+            model="nova-3",
+            language="multi",
         ),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
+
         llm=google.LLM(
-                model="gemini-3.5-flash-lite",
-            ),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
+            model="gemini-3.5-flash-lite",
+        ),
+
         tts=murf.TTS(
-                voice="Anisha", 
-                locale="en-IN",
-                style="Conversation",
-                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-                text_pacing=True
+            voice="Anisha",
+            style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(
+                min_sentence_len=2
             ),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
+            text_pacing=True,
+        ),
+
         turn_detection=MultilingualModel(),
+
         vad=ctx.proc.userdata["vad"],
+
         userdata=caller_metadata,
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
+
         preemptive_generation=True,
     )
 
-    # To use a realtime model instead of a voice pipeline, use the following session setup instead.
-    # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/))
-    # 1. Install livekit-agents[openai]
-    # 2. Set OPENAI_API_KEY in .env.local
-    # 3. Add `from livekit.plugins import openai` to the top of this file
-    # 4. Use the following session setup instead of the version above
-    # session = AgentSession(
-    #     llm=openai.realtime.RealtimeModel(voice="marin")
-    # )
+    # --------------------------------------------------------
+    # START SESSION
+    # --------------------------------------------------------
 
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = hedra.AvatarSession(
-    #   avatar_id="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/hedra
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
-
-    # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=Assistant(),
+        agent=assistant,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
-                    if params.participant.kind
-                    == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    if (
+                        params.participant.kind
+                        == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    )
                     else noise_cancellation.BVC()
                 ),
             ),
         ),
     )
 
-    # Join the room and connect to the user
+    # --------------------------------------------------------
+    # CONNECT
+    # --------------------------------------------------------
+
     await ctx.connect()
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
     cli.run_app(server)

@@ -68,6 +68,45 @@ uv run python src/agent.py start
 
 All configuration lives in [`src/agent.py`](src/agent.py).
 
+## Health Access Tooling
+
+This agent includes a real health access tool that classifies symptoms into triage levels and looks up nearby primary health facilities.
+
+### Data sources
+- Primary lookup uses OpenStreetMap Nominatim for location matching.
+- Facility details fallback to a local dataset stored in `backend/data/health_facilities.json`.
+- The local dataset is used when online lookup is unavailable or no matching facility is found.
+
+### What it does
+- Classifies symptoms into one of: `Emergency care`, `Prompt medical consultation`, `Routine healthcare consultation`, or `Self-care / general guidance`.
+- Returns a nearby facility if a location is provided.
+- Includes `data_source` and `data_as_of` so responses can mention when the information is current.
+
+### Failure handling
+- If the external location lookup fails, the agent still provides safe triage guidance.
+- The assistant will say the facility service is unavailable instead of making up details.
+
+## Caller Memory
+
+This agent uses a SQLite database at `backend/caller_memory.db` to store returning caller profiles.
+
+Each caller record contains:
+- `user_id`: unique caller identifier
+- `name`: caller display name
+- `language_preference`: preferred language for future conversations
+- `facts`: safe profile facts such as age band, ongoing conditions, last triage outcome, and a short previous concern summary
+- `last_interaction`: timestamp of the last conversation
+
+The agent exposes two tools:
+- `lookup_caller`: find a caller profile by `user_id`
+- `save_caller`: save caller profile updates after the user consents
+
+Memory rules:
+- Always ask before saving data.
+- Do not save if the user says no.
+- Greet returning callers by name and mention the previous summary when relevant.
+- Never store written-out medical notes or sensitive health details.
+
 ### System prompt
 
 The `SYSTEM_PROMPT` constant at the top of `agent.py` controls what your agent does. Change it to build any voice-powered use case.

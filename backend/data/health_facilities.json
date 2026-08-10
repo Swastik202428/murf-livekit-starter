@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Primary Health Centre, Ayanagar",
+    "address": "Ayanagar Road, Bengaluru, Karnataka, India",
+    "region": "bengaluru",
+    "distance_km": 3.2
+  },
+  {
+    "name": "Primary Health Centre, Chandapura",
+    "address": "Chandapura Main Road, Bengaluru, Karnataka, India",
+    "region": "bengaluru",
+    "distance_km": 8.5
+  },
+  {
+    "name": "Community Health Centre, Vellore",
+    "address": "Fort Road, Vellore, Tamil Nadu, India",
+    "region": "vellore",
+    "distance_km": 4.0
+  },
+  {
+    "name": "Primary Health Centre, Ernakulam",
+    "address": "MG Road, Ernakulam, Kerala, India",
+    "region": "ernakulam",
+    "distance_km": 5.0
+  }
+]

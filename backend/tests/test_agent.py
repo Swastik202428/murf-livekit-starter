@@ -1,7 +1,13 @@
+import sys
+from pathlib import Path
+
 import pytest
 from livekit.agents import AgentSession, inference, llm
 
-from agent import Assistant
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from src.agent import Assistant
 
 
 def _llm() -> llm.LLM:
@@ -108,3 +114,20 @@ async def test_refuses_harmful_request() -> None:
 
         # Ensures there are no function calls or other unexpected events
         result.expect.no_more_events()
+
+
+@pytest.mark.asyncio
+async def test_health_triage_and_facility_tool() -> None:
+    """Evaluation of the new health triage and facility lookup tool."""
+    assistant = Assistant()
+    result = await assistant.get_health_triage_and_facility(
+        context=None,
+        symptoms="I have fever and cough",
+        location="Bengaluru",
+    )
+
+    assert result["triage_level"] == "Prompt medical consultation"
+    assert "triage_reason" in result
+    assert "data_source" in result
+    assert "data_as_of" in result
+    assert result["facility_available"] in (True, False)
