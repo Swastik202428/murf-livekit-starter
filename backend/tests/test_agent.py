@@ -7,11 +7,19 @@ from livekit.agents import AgentSession, inference, llm
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.agent import Assistant
+from src.agent import Assistant, SYSTEM_PROMPT
 
 
 def _llm() -> llm.LLM:
     return inference.LLM(model="openai/gpt-4.1-mini")
+
+
+def test_healthaccess_outbound_prompt() -> None:
+    """The agent should follow the outbound medication reminder persona."""
+    assert "HealthAccess" in SYSTEM_PROMPT
+    assert "Hello, I'm HealthAccess, an AI healthcare assistant." in SYSTEM_PROMPT
+    assert "Have you taken your scheduled medicine?" in SYSTEM_PROMPT
+    assert "I won't continue this reminder call" in SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

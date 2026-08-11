@@ -34,404 +34,261 @@ from .caller_memory import init_db, lookup_caller, save_caller
 
 
 # ============================================================
-# ENVIRONMENT
+# PATHS / ENVIRONMENT
 # ============================================================
 
-# Load backend/.env.local first
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env.local")
 load_dotenv(BASE_DIR / ".env")
 
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logger = logging.getLogger("agent")
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
+logger = logging.getLogger("healthaccess-agent")
 
 DATA_DIR = BASE_DIR / "data"
-
 FACILITIES_FILE = DATA_DIR / "health_facilities.json"
 
-NOMINATIM_SEARCH_URL = (
-    "https://nominatim.openstreetmap.org/search"
-)
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 
 DB_CONN = init_db()
 
 
 # ============================================================
-# MEDISATHI SYSTEM PROMPT
+# SYSTEM PROMPT
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are MediSathi, an AI-powered Healthcare Voice Assistant.
+You are HealthAccess, an AI-powered healthcare voice assistant.
 
-Your job is to make healthcare information simple, safe, accessible,
-and easy to understand through natural voice conversations.
+Your role is to provide safe, simple and helpful healthcare
+information through natural voice conversations.
 
-You are friendly, calm, patient, empathetic, and professional.
+You are NOT a doctor, nurse, pharmacist, or healthcare professional.
 
-You are NOT a doctor.
-
-You must never diagnose a disease, prescribe medication, recommend
-medication dosages, or replace a qualified healthcare professional.
-
-Do not use emojis in spoken responses.
-Do not use markdown in spoken responses.
-Keep responses short, clear, natural, and easy to understand.
+You must never diagnose a medical condition or prescribe medication.
 
 ============================================================
-FIRST GREETING
+PERSONALITY
 ============================================================
 
-When the conversation begins, say:
+Be:
 
-"Hello! I'm MediSathi, your AI Healthcare Voice Assistant. Namaste!
-I can help you understand common health concerns and guide you
-toward appropriate care. How can I help you today?"
+- Friendly
+- Calm
+- Patient
+- Empathetic
+- Professional
+- Concise
+- Natural
 
-Do not repeat the full greeting later.
+Use short sentences suitable for voice conversations.
 
-============================================================
-DAY 5 TOOL
-============================================================
+Do not sound robotic.
 
-You have access to a healthcare tool called:
-
-get_health_triage_and_facility
-
-This tool:
-
-1. Reads the symptoms provided by the user.
-2. Determines a general urgency level.
-3. Can use the user's location.
-4. Looks up a healthcare facility from the local MediSathi dataset.
-5. Can use OpenStreetMap Nominatim to understand the location.
-6. Returns the source and date of the information.
-
-The healthcare facility dataset is LOCAL.
-It is NOT a live medical database.
-
-============================================================
-WHEN TO USE THE TOOL
-============================================================
-
-Use get_health_triage_and_facility when the user:
-
-- Describes one or more symptoms.
-- Asks how serious symptoms may be.
-- Asks how urgent symptoms may be.
-- Asks whether they should seek medical care.
-- Asks for a nearby healthcare facility.
-- Gives symptoms together with a location.
-
-Examples:
-
-"I have a fever."
-
-"I have chest pain."
-
-"I'm having difficulty breathing."
-
-"I have a headache. Should I see a doctor?"
-
-"I have fever and difficulty breathing."
-
-"I have chest pain and I am in Lucknow."
-
-When a location is given, pass it to the tool.
-
-Do not invent a location.
-
-============================================================
-WHEN NOT TO USE THE TOOL
-============================================================
-
-Do not use the tool for:
-
-- Greetings.
-- Casual conversation.
-- Non-health questions.
-- Unrelated questions.
-- Questions that do not require symptom assessment.
-
-============================================================
-TOOL INPUT
-============================================================
-
-Only provide symptoms that the user actually mentioned.
-
-Never invent symptoms.
-
-Never invent medical history.
-
-If the user provides a location, pass that location.
-
-============================================================
-TOOL RESULT
-============================================================
-
-Never read raw JSON to the user.
-
-Never read technical field names such as:
-
-triage_level
-data_source
-facility_available
-
-Translate the result into natural language.
-
-For example:
-
-"Based on the health information available to me, this may need
-prompt medical attention."
-
-============================================================
-TRIAGE LEVELS
-============================================================
-
-Possible guidance levels:
-
-Self-care / general guidance
-Routine healthcare consultation
-Prompt medical consultation
-Emergency care
-
-These are general guidance levels only.
-
-They are NOT diagnoses.
-
-============================================================
-EMERGENCY
-============================================================
-
-Treat these symptoms as potentially serious:
-
-- Chest pain.
-- Difficulty breathing.
-- Shortness of breath.
-- Severe bleeding.
-- Loss of consciousness.
-- Seizure.
-- Stroke-like symptoms.
-- Severe poisoning.
-- Suicidal thoughts.
-- Severe burns.
-- Severe or rapidly worsening symptoms.
-
-If the tool returns Emergency care:
-
-Be direct and concise.
-
-Say:
-
-"These symptoms may indicate a potentially serious situation.
-Please seek emergency medical care immediately."
-
-Do not ask unnecessary questions during an obvious emergency.
-
-Do not diagnose the underlying condition.
-
-============================================================
-UNKNOWN INFORMATION
-============================================================
-
-If the tool cannot determine an appropriate result, do not guess.
-
-Say:
-
-"I don't have enough information in my current health dataset to
-safely assess the urgency of these symptoms."
-
-Then recommend professional medical advice when appropriate.
-
-============================================================
-TOOL FAILURE
-============================================================
-
-If the health data source or location lookup fails:
-
-Do NOT:
-
-- Invent a result.
-- Guess a triage level.
-- Invent a facility.
-- Pretend the tool worked.
-- Read technical errors.
-
-Instead say:
-
-"I'm sorry, my health information source is temporarily unavailable,
-so I can't safely assess the situation using my current data.
-If your symptoms are severe, rapidly worsening, or concerning,
-please seek professional medical care."
-
-============================================================
-DATA FRESHNESS
-============================================================
-
-MediSathi currently uses a local dataset.
-
-Never call this live medical data.
-
-If data_as_of is available, mention it when useful.
-
-For example:
-
-"This information comes from MediSathi's local dataset, last updated
-on August 10, 2026."
-
-Never claim that this is government or hospital live data.
-
-============================================================
-FACILITY INFORMATION
-============================================================
-
-If a facility is returned:
-
-Explain it naturally.
-
-For example:
-
-"I found a healthcare facility in the available local dataset."
-
-Never invent:
-
-- Facility names.
-- Addresses.
-- Distances.
-- Phone numbers.
-
-If no facility is available, say so honestly.
-
-============================================================
-FOLLOW-UP QUESTIONS
-============================================================
-
-When necessary, ask about:
-
-- Main symptoms.
-- Duration.
-- Severity.
-- Whether symptoms are getting better or worse.
-- Relevant existing conditions.
-- Current medications.
-- Allergies.
-- Age when relevant.
-
-Ask one important question at a time.
-
-If there is an obvious emergency, prioritize emergency guidance.
-
-============================================================
-MEMORY
-============================================================
-
-MediSathi can use caller memory.
-
-Use remembered information only when relevant.
-
-Current information from the user always takes priority.
-
-Use save_caller only when the caller has explicitly agreed to
-remember information.
+Do not repeatedly ask the same question.
 
 ============================================================
 LANGUAGE
 ============================================================
 
-The user may speak English, Hindi, or Hinglish.
+Speak naturally in the language used by the user.
 
-Respond in the language the user naturally uses.
+If the user speaks English:
+Respond in English.
 
-If the user speaks Hindi or Hinglish, respond naturally in Hindi
-or Hinglish.
+If the user speaks Hindi:
+Respond naturally in Hindi.
 
-Use simple conversational Hindi.
+If the user speaks Hinglish:
+Respond naturally in simple Hinglish.
 
-Example:
-
-User:
-"Mujhe bukhar hai aur saans lene mein dikkat ho rahi hai."
-
-Response:
-
-"Saans lene mein dikkat ke saath bukhar ko lightly nahi lena chahiye.
-Available health information ke according, ye emergency ho sakti hai.
-Please turant emergency medical care lein."
+Do not force English when the user is speaking Hindi.
 
 ============================================================
-NATURAL VOICE
+HEALTHCARE SAFETY
 ============================================================
 
-Keep responses:
+You provide educational information only.
 
-- Short.
-- Clear.
-- Natural.
-- Conversational.
-- Easy to understand.
+Never:
 
-Do not read JSON.
+- Diagnose the user.
+- Prescribe medication.
+- Recommend changing medication dosage.
+- Recommend stopping prescribed medication.
+- Recommend doubling a missed dose.
+- Invent medication names.
+- Invent medical history.
+- Invent allergies.
+- Invent test results.
+- Invent prescriptions.
 
-Do not read Python code.
-
-Do not mention internal function names unless the user asks.
-
-Instead of:
-
-"I am calling get_health_triage_and_facility."
-
-Say:
-
-"Let me check the health information I have for those symptoms."
+If the user asks about medication dosage, interactions,
+stopping medication, or changing medication, advise them to
+contact their doctor, pharmacist, or another qualified
+healthcare professional.
 
 ============================================================
-NO HALLUCINATION
+SYMPTOMS
 ============================================================
 
-If you do not know something, say so.
+When discussing symptoms:
 
-If the local dataset does not contain enough information, say so.
+1. Listen carefully.
+2. Ask only necessary follow-up questions.
+3. Explain that symptoms can have different causes.
+4. Do not present a diagnosis as fact.
+5. Recommend appropriate professional care when needed.
 
-If a tool fails, say so.
-
-Never invent medical facts.
-
-Never invent a facility.
-
-Never invent a triage result.
+If symptoms sound potentially serious, recommend urgent medical
+attention.
 
 ============================================================
-OUT OF SCOPE
+EMERGENCY WARNING SIGNS
 ============================================================
 
-For trading, cryptocurrency, politics, finance, gambling, hacking,
-legal advice, or unrelated topics, say:
+If the user reports potentially life-threatening symptoms such as:
 
-"My primary role is healthcare assistance, so I can't provide reliable
-advice on that topic. If you have a health-related question, I'd be
-happy to help."
+- Severe difficulty breathing
+- Severe chest pain
+- Loss of consciousness
+- Severe bleeding
+- Seizure
+- Severe allergic reaction
+- Stroke-like symptoms
+- Severe poisoning
+
+Say clearly:
+
+"This may require urgent medical attention. Please seek emergency
+medical care immediately or contact your local emergency service."
+
+Do not diagnose.
+
+============================================================
+DAY 5 HEALTH TOOL
+============================================================
+
+You have access to a healthcare tool that can:
+
+1. Assess general urgency based on symptoms.
+2. Look up healthcare facility information.
+
+Use the tool when the user needs practical healthcare guidance
+or asks for a nearby healthcare facility.
+
+The tool provides general triage information.
+
+It does NOT provide a medical diagnosis.
+
+When using tool results:
+
+- Explain the result simply.
+- Do not exaggerate urgency.
+- Do not invent facility information.
+- Clearly distinguish general guidance from professional diagnosis.
+
+============================================================
+CALLER MEMORY
+============================================================
+
+Caller memory may contain:
+
+- Name
+- Preferred language
+- Previously saved safe facts
+- Previous interaction information
+
+Use memory only when relevant.
+
+Never invent information that is not present in memory.
+
+Never expose private or unnecessary information.
+
+Never ask for:
+
+- Aadhaar number
+- PAN number
+- OTP
+- Passwords
+- Bank details
+- Credit card information
+
+============================================================
+MEDICATION REMINDERS
+============================================================
+
+If this is an outbound medication reminder call:
+
+Clearly explain:
+
+1. Who you are.
+2. Why you are calling.
+3. That the user can opt out of future reminder calls.
+
+Then ask:
+
+"Have you taken your scheduled medicine?"
+
+If the user confirms that they took it:
+
+"Great, thank you for confirming. Please continue following the
+medication schedule provided by your healthcare professional.
+Take care."
+
+If the user has not taken it or forgot:
+
+"Okay, that's understandable. Please follow the medication
+instructions provided with your prescription. If you're unsure
+what to do after missing a dose, please contact your doctor
+or pharmacist."
+
+Never recommend doubling a dose.
+
+============================================================
+OPT-OUT
+============================================================
+
+If the user says:
+
+- Don't call me again.
+- Stop calling me.
+- Remove me.
+- I don't want reminders.
+- Please don't call.
+- No more calls.
+
+Respect the request immediately.
+
+Respond:
+
+"Absolutely. I understand. I won't continue this reminder call.
+Thank you."
+
+Do not argue or persuade.
+
+============================================================
+IDENTITY
+============================================================
+
+If asked who you are:
+
+"I'm HealthAccess, an AI healthcare assistant."
+
+If asked whether you are a doctor:
+
+"No. I'm an AI healthcare assistant. I can provide general
+health information, but I'm not a doctor and I can't replace
+professional medical advice."
 
 ============================================================
 FINAL RULE
 ============================================================
 
-MediSathi's goal is not to diagnose.
+Always prioritize safety.
 
-Its goal is:
+If you are unsure, do not guess.
 
-Listen -> Understand -> Use the appropriate healthcare tool ->
-Explain the result safely -> Guide the user toward appropriate care.
-
-Always prioritize safety, honesty, clarity, and natural conversation.
+Recommend contacting an appropriate healthcare professional.
 """
 
 
@@ -439,10 +296,9 @@ Always prioritize safety, honesty, clarity, and natural conversation.
 # ASSISTANT
 # ============================================================
 
+
 class Assistant(Agent):
-
     def __init__(self, memory_context: str = "") -> None:
-
         instructions = SYSTEM_PROMPT
 
         if memory_context:
@@ -452,10 +308,7 @@ class Assistant(Agent):
 CURRENT CALLER MEMORY
 ============================================================
 
-The following information was retrieved from the caller's
-previous conversations.
-
-Use it only when relevant.
+Use the following saved caller information only when relevant.
 
 Do not invent additional information.
 
@@ -466,12 +319,10 @@ END CALLER MEMORY
 ============================================================
 """
 
-        super().__init__(
-            instructions=instructions
-        )
+        super().__init__(instructions=instructions)
 
     # ========================================================
-    # LOOKUP CALLER
+    # CALLER MEMORY TOOL
     # ========================================================
 
     @function_tool
@@ -481,11 +332,10 @@ END CALLER MEMORY
         user_id: str | None = None,
     ):
         """
-        Look up a caller's saved profile.
+        Look up saved caller information.
         """
 
-        if user_id is None:
-
+        if not user_id:
             try:
                 userdata = context.userdata
             except Exception:
@@ -500,10 +350,15 @@ END CALLER MEMORY
                 "reason": "missing user_id",
             }
 
-        record = lookup_caller(
-            DB_CONN,
-            user_id,
-        )
+        try:
+            record = lookup_caller(DB_CONN, user_id)
+        except Exception:
+            logger.exception("Caller lookup failed.")
+
+            return {
+                "found": False,
+                "reason": "database_error",
+            }
 
         if not record:
             return {
@@ -517,7 +372,7 @@ END CALLER MEMORY
         }
 
     # ========================================================
-    # SAVE CALLER
+    # SAVE CALLER TOOL
     # ========================================================
 
     @function_tool
@@ -530,11 +385,10 @@ END CALLER MEMORY
         facts: dict[str, str] | None = None,
     ):
         """
-        Save safe caller information after explicit consent.
+        Save safe caller information.
         """
 
-        if user_id is None:
-
+        if not user_id:
             try:
                 userdata = context.userdata
             except Exception:
@@ -549,23 +403,32 @@ END CALLER MEMORY
                 "reason": "missing user_id",
             }
 
-        record = save_caller(
-            DB_CONN,
-            user_id=user_id,
-            name=name,
-            language_preference=language_preference,
-            facts=facts,
-        )
+        try:
+            record = save_caller(
+                DB_CONN,
+                user_id=user_id,
+                name=name,
+                language_preference=language_preference,
+                facts=facts,
+            )
 
-        logger.info(
-            "Caller memory saved for user_id=%s",
-            user_id,
-        )
+            logger.info(
+                "Caller memory saved: %s",
+                user_id,
+            )
 
-        return {
-            "saved": True,
-            **record,
-        }
+            return {
+                "saved": True,
+                **record,
+            }
+
+        except Exception:
+            logger.exception("Caller memory save failed.")
+
+            return {
+                "saved": False,
+                "reason": "database_error",
+            }
 
     # ========================================================
     # DAY 5 HEALTH TOOL
@@ -579,51 +442,46 @@ END CALLER MEMORY
         location: str | None = None,
     ):
         """
-        Assess the general urgency of the user's symptoms and,
-        when possible, find a healthcare facility.
-
-        Use this tool when the user describes symptoms and asks
-        about seriousness, urgency, medical attention, or a
-        nearby healthcare facility.
-
-        This tool does not diagnose diseases.
-
-        The data is based on the MediSathi local dataset.
+        Assess general urgency from symptoms and find healthcare
+        facility information from the local dataset.
         """
 
+        del context
+
         logger.info(
-            "DAY 5 TOOL CALLED | symptoms=%s | location=%s",
+            "HEALTH TOOL | symptoms=%s | location=%s",
             symptoms,
             location,
         )
 
+        if not symptoms or not symptoms.strip():
+            return {
+                "success": False,
+                "error": "missing_symptoms",
+                "message": "Symptoms are required.",
+            }
+
         try:
+            symptoms_clean = symptoms.strip()
+            symptoms_lower = symptoms_clean.lower()
 
-            symptoms_lower = (
-                symptoms.strip().lower()
+            triage_level, triage_reason = self._determine_triage(
+                symptoms_lower
             )
 
-            triage_level, triage_reason = (
-                self._determine_triage(
-                    symptoms_lower
-                )
-            )
-
-            facility_result = (
-                self._lookup_nearest_facility(
-                    location
-                )
+            facility_result = self._lookup_nearest_facility(
+                location
             )
 
             result = {
                 "success": True,
+                "symptoms": symptoms_clean,
+                "location": location,
                 "triage_level": triage_level,
                 "triage_reason": triage_reason,
-                "symptoms": symptoms,
-                "location": location,
                 "data_source": facility_result.get(
                     "data_source",
-                    "MediSathi local dataset",
+                    "HealthAccess local dataset",
                 ),
                 "data_as_of": facility_result.get(
                     "data_as_of",
@@ -634,28 +492,23 @@ END CALLER MEMORY
             result.update(facility_result)
 
             logger.info(
-                "DAY 5 TOOL RESULT | %s",
+                "HEALTH TOOL RESULT | %s",
                 result,
             )
 
             return result
 
         except Exception:
-
-            logger.exception(
-                "DAY 5 HEALTH TOOL FAILED"
-            )
+            logger.exception("Health tool failed.")
 
             return {
                 "success": False,
                 "error": "health_data_unavailable",
                 "message": (
-                    "The MediSathi health information source "
+                    "The HealthAccess health information source "
                     "is temporarily unavailable."
                 ),
-                "data_source": (
-                    "MediSathi local dataset"
-                ),
+                "data_source": "HealthAccess local dataset",
                 "data_as_of": date.today().isoformat(),
             }
 
@@ -721,11 +574,9 @@ END CALLER MEMORY
             "mild pain",
         ]
 
-        # Emergency first
+        # Emergency
         for keyword in emergency_keywords:
-
             if keyword in symptoms:
-
                 return (
                     "Emergency care",
                     (
@@ -734,11 +585,9 @@ END CALLER MEMORY
                     ),
                 )
 
-        # Prompt medical consultation
+        # Prompt consultation
         for keyword in prompt_keywords:
-
             if keyword in symptoms:
-
                 return (
                     "Prompt medical consultation",
                     (
@@ -748,24 +597,18 @@ END CALLER MEMORY
                 )
 
         # Fever + cough
-        if (
-            "fever" in symptoms
-            and "cough" in symptoms
-        ):
-
+        if "fever" in symptoms and "cough" in symptoms:
             return (
                 "Prompt medical consultation",
                 (
-                    "Fever combined with respiratory symptoms "
-                    "may need prompt medical attention."
+                    "Fever combined with respiratory symptoms may "
+                    "need prompt medical attention."
                 ),
             )
 
         # Routine symptoms
         for keyword in routine_keywords:
-
             if keyword in symptoms:
-
                 return (
                     "Routine healthcare consultation",
                     (
@@ -775,6 +618,7 @@ END CALLER MEMORY
                     ),
                 )
 
+        # Default
         return (
             "Routine healthcare consultation",
             (
@@ -793,115 +637,99 @@ END CALLER MEMORY
         location: str | None,
     ) -> dict:
 
-        facility_data = (
-            self._load_local_facilities()
-        )
+        facilities = self._load_local_facilities()
 
-        if not facility_data:
-
+        if not facilities:
             return {
                 "facility_available": False,
                 "facility_message": (
                     "No local healthcare facility data is available."
                 ),
-                "data_source": (
-                    "MediSathi local dataset"
-                ),
+                "data_source": "HealthAccess local dataset",
                 "data_as_of": date.today().isoformat(),
             }
 
-        if location:
-
-            lookup = (
-                self._lookup_facility_by_location(
-                    location,
-                    facility_data,
-                )
+        # Try location-specific lookup first.
+        if location and location.strip():
+            location_result = self._lookup_facility_by_location(
+                location.strip(),
+                facilities,
             )
 
-            if lookup.get(
-                "facility_available"
-            ):
-                return lookup
+            if location_result.get("facility_available"):
+                return location_result
 
-        default = facility_data[0]
+        # Fallback to first facility in local dataset.
+        default_facility = facilities[0]
 
         return {
             "facility_available": True,
-            "facility_name": default.get(
+            "facility_name": default_facility.get(
                 "name",
                 "Healthcare facility",
             ),
-            "facility_address": default.get(
+            "facility_address": default_facility.get(
                 "address",
                 "Address unavailable",
             ),
-            "distance_km": default.get(
+            "distance_km": default_facility.get(
                 "distance_km",
                 0.0,
             ),
             "facility_message": (
                 "Facility information is based on the "
-                "MediSathi local reference dataset."
+                "HealthAccess local reference dataset."
             ),
-            "data_source": (
-                "MediSathi local dataset"
-            ),
+            "data_source": "HealthAccess local dataset",
             "data_as_of": date.today().isoformat(),
         }
 
     # ========================================================
-    # LOAD LOCAL FACILITY DATASET
+    # LOAD FACILITY DATASET
     # ========================================================
 
-    def _load_local_facilities(
-        self,
-    ) -> list[dict]:
+    def _load_local_facilities(self) -> list[dict]:
 
         try:
-
             with open(
                 FACILITIES_FILE,
                 "r",
                 encoding="utf-8",
             ) as handle:
-
                 data = json.load(handle)
 
-            if not isinstance(data, list):
-
-                logger.warning(
-                    "Facility dataset is not a list."
-                )
-
-                return []
-
-            return data
-
         except FileNotFoundError:
-
             logger.warning(
-                "Facility dataset missing: %s",
+                "Facility dataset not found: %s",
                 FACILITIES_FILE,
             )
-
             return []
 
         except json.JSONDecodeError:
-
             logger.exception(
-                "Unable to parse facility dataset."
+                "Facility dataset contains invalid JSON."
             )
-
             return []
 
         except OSError:
-
             logger.exception(
                 "Unable to read facility dataset."
             )
-
             return []
+
+        if not isinstance(data, list):
+            logger.warning(
+                "Facility dataset must contain a JSON list."
+            )
+            return []
+
+        valid_facilities = [
+            item
+            for item in data
+            if isinstance(item, dict)
+        ]
+
+        return valid_facilities
 
     # ========================================================
     # LOCATION LOOKUP
@@ -914,7 +742,6 @@ END CALLER MEMORY
     ) -> dict:
 
         try:
-
             query = urllib.parse.urlencode(
                 {
                     "q": location,
@@ -923,14 +750,12 @@ END CALLER MEMORY
                 }
             )
 
-            url = (
-                f"{NOMINATIM_SEARCH_URL}?{query}"
-            )
+            url = f"{NOMINATIM_SEARCH_URL}?{query}"
 
             request = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "MediSathi/1.0"
+                    "User-Agent": "HealthAccess/1.0"
                 },
             )
 
@@ -939,62 +764,63 @@ END CALLER MEMORY
                 timeout=8,
             ) as response:
 
-                raw = response.read().decode(
+                raw_response = response.read().decode(
                     "utf-8"
                 )
 
-            places = json.loads(raw)
+            places = json.loads(raw_response)
 
-            if places:
+            if not isinstance(places, list) or not places:
+                return {
+                    "facility_available": False,
+                    "facility_message": (
+                        "No location information was found."
+                    ),
+                    "data_source": "OpenStreetMap Nominatim",
+                    "data_as_of": date.today().isoformat(),
+                }
 
-                display_name = (
-                    places[0]
-                    .get(
-                        "display_name",
-                        "",
-                    )
-                    .lower()
-                )
+            display_name = (
+                places[0]
+                .get("display_name", "")
+                .lower()
+            )
 
-                for facility in facilities:
+            for facility in facilities:
 
-                    region = facility.get(
-                        "region",
-                        "",
-                    )
+                region = str(
+                    facility.get("region", "")
+                ).strip()
 
-                    if (
-                        region
-                        and region.lower()
-                        in display_name
-                    ):
+                if not region:
+                    continue
 
-                        return {
-                            "facility_available": True,
-                            "facility_name": facility.get(
-                                "name",
-                                "Healthcare facility",
-                            ),
-                            "facility_address": facility.get(
-                                "address",
-                                "Address unavailable",
-                            ),
-                            "distance_km": facility.get(
-                                "distance_km",
-                                5.0,
-                            ),
-                            "facility_message": (
-                                f"Facility information found "
-                                f"for {location}."
-                            ),
-                            "data_source": (
-                                "OpenStreetMap Nominatim "
-                                "+ MediSathi local dataset"
-                            ),
-                            "data_as_of": (
-                                date.today().isoformat()
-                            ),
-                        }
+                if region.lower() in display_name:
+
+                    return {
+                        "facility_available": True,
+                        "facility_name": facility.get(
+                            "name",
+                            "Healthcare facility",
+                        ),
+                        "facility_address": facility.get(
+                            "address",
+                            "Address unavailable",
+                        ),
+                        "distance_km": facility.get(
+                            "distance_km",
+                            5.0,
+                        ),
+                        "facility_message": (
+                            f"Facility information found "
+                            f"for {location}."
+                        ),
+                        "data_source": (
+                            "OpenStreetMap Nominatim + "
+                            "HealthAccess local dataset"
+                        ),
+                        "data_as_of": date.today().isoformat(),
+                    }
 
         except (
             HTTPError,
@@ -1013,12 +839,23 @@ END CALLER MEMORY
                     "The location lookup is temporarily "
                     "unavailable."
                 ),
-                "data_source": (
-                    "OpenStreetMap Nominatim"
+                "data_source": "OpenStreetMap Nominatim",
+                "data_as_of": date.today().isoformat(),
+            }
+
+        except json.JSONDecodeError:
+
+            logger.exception(
+                "Invalid response from location service."
+            )
+
+            return {
+                "facility_available": False,
+                "facility_message": (
+                    "The location service returned invalid data."
                 ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "data_source": "OpenStreetMap Nominatim",
+                "data_as_of": date.today().isoformat(),
             }
 
         except Exception:
@@ -1033,12 +870,8 @@ END CALLER MEMORY
                     "The location lookup is temporarily "
                     "unavailable."
                 ),
-                "data_source": (
-                    "OpenStreetMap Nominatim"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "data_source": "OpenStreetMap Nominatim",
+                "data_as_of": date.today().isoformat(),
             }
 
         return {
@@ -1047,23 +880,26 @@ END CALLER MEMORY
                 "No matching healthcare facility was found "
                 "for the given location."
             ),
-            "data_source": (
-                "MediSathi local dataset"
-            ),
-            "data_as_of": (
-                date.today().isoformat()
-            ),
+            "data_source": "HealthAccess local dataset",
+            "data_as_of": date.today().isoformat(),
         }
 
 
 # ============================================================
-# SERVER
+# LIVEKIT SERVER
 # ============================================================
 
 server = AgentServer()
 
 
+# ============================================================
+# PREWARM
+# ============================================================
+
 def prewarm(proc: JobProcess):
+    """
+    Load VAD once per worker process.
+    """
 
     proc.userdata["vad"] = silero.VAD.load()
 
@@ -1072,29 +908,76 @@ server.setup_fnc = prewarm
 
 
 # ============================================================
-# AGENT SESSION
+# LIVEKIT SESSION
 # ============================================================
 
-@server.rtc_session(
-    agent_name="my-agent"
-)
+@server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
 
     ctx.log_context_fields = {
-        "room": ctx.room.name,
+        "room": ctx.room.name
     }
 
     # --------------------------------------------------------
-    # GET CALLER
+    # JOB METADATA
+    # --------------------------------------------------------
+
+    dial_info: dict = {}
+
+    try:
+        raw_metadata = ctx.job.metadata or ""
+
+        if raw_metadata.strip():
+            parsed_metadata = json.loads(
+                raw_metadata
+            )
+
+            if isinstance(parsed_metadata, dict):
+                dial_info = parsed_metadata
+
+    except json.JSONDecodeError:
+        logger.warning(
+            "Invalid job metadata: %s",
+            ctx.job.metadata,
+        )
+
+    # --------------------------------------------------------
+    # OUTBOUND CALL INFORMATION
+    # --------------------------------------------------------
+
+    phone_number = dial_info.get("phone_number")
+
+    is_outbound = bool(phone_number)
+
+    logger.info(
+        "Session started | outbound=%s | phone=%s",
+        is_outbound,
+        phone_number,
+    )
+
+    # --------------------------------------------------------
+    # CONNECT TO ROOM
+    # --------------------------------------------------------
+
+    await ctx.connect()
+
+    # --------------------------------------------------------
+    # FIND PARTICIPANT
     # --------------------------------------------------------
 
     caller_metadata: dict[str, str] = {}
 
     try:
 
-        participant = (
-            await ctx.wait_for_participant()
-        )
+        if is_outbound:
+
+            participant = await ctx.wait_for_participant(
+                kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+            )
+
+        else:
+
+            participant = await ctx.wait_for_participant()
 
         caller_metadata = {
             "caller_id": participant.identity,
@@ -1102,7 +985,7 @@ async def my_agent(ctx: JobContext):
         }
 
         logger.info(
-            "Caller connected: id=%s name=%s",
+            "Caller connected | id=%s | name=%s",
             participant.identity,
             participant.name,
         )
@@ -1114,7 +997,7 @@ async def my_agent(ctx: JobContext):
         )
 
     # --------------------------------------------------------
-    # LOAD MEMORY
+    # CALLER MEMORY
     # --------------------------------------------------------
 
     memory_context = ""
@@ -1152,10 +1035,7 @@ async def my_agent(ctx: JobContext):
                 )
 
                 saved_facts = (
-                    saved_caller.get(
-                        "facts",
-                        {},
-                    )
+                    saved_caller.get("facts", {})
                     or {}
                 )
 
@@ -1199,11 +1079,11 @@ async def my_agent(ctx: JobContext):
     # --------------------------------------------------------
 
     assistant = Assistant(
-        memory_context=memory_context,
+        memory_context=memory_context
     )
 
     # --------------------------------------------------------
-    # VOICE PIPELINE
+    # AGENT SESSION
     # --------------------------------------------------------
 
     session = AgentSession(
@@ -1243,7 +1123,9 @@ async def my_agent(ctx: JobContext):
         agent=assistant,
         room=ctx.room,
         room_options=room_io.RoomOptions(
+
             audio_input=room_io.AudioInputOptions(
+
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
                     if (
@@ -1252,15 +1134,27 @@ async def my_agent(ctx: JobContext):
                     )
                     else noise_cancellation.BVC()
                 ),
+
             ),
         ),
     )
 
     # --------------------------------------------------------
-    # CONNECT
+    # OUTBOUND CALL GREETING
     # --------------------------------------------------------
 
-    await ctx.connect()
+    if is_outbound:
+
+        await session.generate_reply(
+            instructions=(
+                "Start the outbound medication reminder call now. "
+                "Clearly introduce HealthAccess, explain that this "
+                "is a scheduled medication reminder, tell the user "
+                "they can opt out of future reminder calls, and "
+                "then ask whether they have taken their scheduled "
+                "medicine. Keep the opening short and natural."
+            )
+        )
 
 
 # ============================================================
@@ -1269,3 +1163,4 @@ async def my_agent(ctx: JobContext):
 
 if __name__ == "__main__":
     cli.run_app(server)
+
