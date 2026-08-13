@@ -29,8 +29,12 @@ interface AppProps {
 export function App({ appConfig }: AppProps) {
   const tokenSource = useMemo(() => {
     const customSource = async () => {
-      const body: Record<string, string> = { identity: getCallerIdentity() };
+      const body: Record<string, string> = {
+        identity: getCallerIdentity(),
+      };
+
       const url = '/api/token';
+
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -51,16 +55,29 @@ export function App({ appConfig }: AppProps) {
 
   const session = useSession(
     tokenSource,
-    appConfig.agentName ? { agentName: appConfig.agentName } : undefined
+    appConfig.agentName
+      ? { agentName: appConfig.agentName }
+      : undefined
   );
 
   return (
     <AgentSessionProvider session={session}>
       <AppSetup />
+
+      {/* Analytics Dashboard Button */}
+      <a
+        href="/analytics"
+        className="fixed right-6 top-6 z-50 flex items-center gap-2 rounded-full border border-cyan-400/30 bg-slate-900/90 px-5 py-3 text-sm font-semibold text-cyan-300 shadow-lg backdrop-blur-md transition-all duration-200 hover:border-cyan-300 hover:bg-slate-800 hover:text-white hover:shadow-cyan-500/20"
+      >
+        📊 Analytics Dashboard
+      </a>
+
       <main className="grid h-svh grid-cols-1 place-content-center">
         <ViewController appConfig={appConfig} />
       </main>
+
       <StartAudioButton label="Start Audio" />
+
       <Toaster
         icons={{
           warning: <WarningIcon weight="bold" />,

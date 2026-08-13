@@ -31,27 +31,14 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from .caller_memory import (
     init_db,
-    lookup_caller as db_lookup_caller,
-    save_caller as db_save_caller,
+    lookup_caller,
+    save_caller,
 )
 
 from .escalation import (
     init_escalation_db,
     create_escalation,
 )
-
-from .call_analytics import (
-    init_analytics_db,
-    start_call,
-    finish_call,
-)
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logger = logging.getLogger("healthaccess-agent")
 
 
 # ============================================================
@@ -63,6 +50,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env.local")
 load_dotenv(BASE_DIR / ".env")
 
+logger = logging.getLogger("healthaccess-agent")
+
 DATA_DIR = BASE_DIR / "data"
 FACILITIES_FILE = DATA_DIR / "health_facilities.json"
 
@@ -70,15 +59,9 @@ NOMINATIM_SEARCH_URL = (
     "https://nominatim.openstreetmap.org/search"
 )
 
-
-# ============================================================
-# DATABASES
-# ============================================================
-
 DB_CONN = init_db()
 
-ANALYTICS_CONN = init_analytics_db()
-
+# Day 7 database
 ESCALATION_CONN = init_escalation_db()
 
 
@@ -87,7 +70,7 @@ ESCALATION_CONN = init_escalation_db()
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are MediSathi, an AI-powered healthcare voice assistant.
+You are HealthAccess, an AI-powered healthcare voice assistant.
 
 Your role is to provide safe, simple and helpful healthcare
 information through natural voice conversations.
@@ -97,6 +80,7 @@ professional.
 
 You must never diagnose a medical condition or prescribe
 medication.
+
 
 ============================================================
 PERSONALITY
@@ -118,6 +102,7 @@ Do not sound robotic.
 
 Do not repeatedly ask the same question.
 
+
 ============================================================
 LANGUAGE
 ============================================================
@@ -134,6 +119,7 @@ If the user speaks Hinglish:
 Respond naturally in simple Hinglish.
 
 Do not force English when the user is speaking Hindi.
+
 
 ============================================================
 HEALTHCARE SAFETY
@@ -159,6 +145,7 @@ stopping medication, or changing medication, advise them to
 contact their doctor, pharmacist, or another qualified
 healthcare professional.
 
+
 ============================================================
 SYMPTOMS
 ============================================================
@@ -171,8 +158,9 @@ When discussing symptoms:
 4. Do not present a diagnosis as fact.
 5. Recommend appropriate professional care when needed.
 
-If symptoms sound potentially serious, recommend urgent
-medical attention.
+If symptoms sound potentially serious, recommend urgent medical
+attention.
+
 
 ============================================================
 EMERGENCY WARNING SIGNS
@@ -191,20 +179,47 @@ If the user reports potentially life-threatening symptoms such as:
 
 Say clearly:
 
-"This may require urgent medical attention. Please seek
-emergency medical care immediately or contact your local
-emergency service."
+"This may require urgent medical attention. Please seek emergency
+medical care immediately or contact your local emergency service."
 
 Do not diagnose.
+
 
 ============================================================
 DAY 7 — HUMAN HELP / ESCALATION
 ============================================================
 
+You now have a human-help escalation tool.
+
 There are TWO situations where you should offer human help:
 
 1. RED-FLAG SYMPTOMS
 2. DIAGNOSIS REQUESTS
+
+
+------------------------------------------------------------
+RED-FLAG SYMPTOMS
+------------------------------------------------------------
+
+If the caller reports potentially serious symptoms such as:
+
+- Severe chest pain
+- Severe difficulty breathing
+- Loss of consciousness
+- Seizure
+- Severe bleeding
+- Stroke-like symptoms
+- Severe allergic reaction
+- Severe poisoning
+
+Treat this as a human-help situation.
+
+First recommend urgent medical attention.
+
+Do NOT diagnose the caller.
+
+Then explain that you can create a short request for human
+healthcare support.
 
 Before calling the escalation tool you MUST:
 
@@ -213,6 +228,20 @@ Before calling the escalation tool you MUST:
 3. Ask for explicit permission.
 4. Wait for the caller's answer.
 
+Use language appropriate for the caller.
+
+Example:
+
+"I can create a request for human healthcare support.
+I would share a short summary of what happened, what I checked,
+how urgent it appears, your language, and your preferred
+follow-up method.
+
+I will not share passwords, OTPs, PINs, or unnecessary private
+information.
+
+Would you like me to create this request?"
+
 ONLY create the request if the caller clearly says YES.
 
 If the caller says NO:
@@ -220,14 +249,46 @@ If the caller says NO:
 - Do NOT create the request.
 - Respect the decision.
 - Continue safe guidance.
-- For emergency symptoms, still recommend immediate
-  emergency medical care.
+- For emergency symptoms, still recommend immediate emergency
+  medical care.
 
-============================================================
+
+------------------------------------------------------------
+DIAGNOSIS REQUESTS
+------------------------------------------------------------
+
+If the caller asks:
+
+- "What disease do I have?"
+- "Can you diagnose me?"
+- "Tell me exactly what I have."
+- "What is my diagnosis?"
+- "Is this definitely a disease?"
+
+Never provide a diagnosis.
+
+Say something like:
+
+"I can't provide a diagnosis. I can give general health
+information, but a qualified healthcare professional needs to
+assess you for a diagnosis."
+
+Then offer human support.
+
+Before calling the escalation tool:
+
+1. Explain what information will be shared.
+2. Ask for explicit permission.
+3. Wait for the answer.
+
+Do NOT call the tool without clear permission.
+
+
+------------------------------------------------------------
 ESCALATION INFORMATION
-============================================================
+------------------------------------------------------------
 
-Only send useful details:
+When creating a human-help request, only send useful details:
 
 - Who needs help
 - What happened
@@ -249,9 +310,10 @@ Never include:
 - Card numbers
 - Unnecessary private information
 
-============================================================
+
+------------------------------------------------------------
 ESCALATION URGENCY
-============================================================
+------------------------------------------------------------
 
 Use:
 
@@ -273,9 +335,10 @@ Use:
 "low"
 for non-urgent human assistance.
 
-============================================================
+
+------------------------------------------------------------
 AFTER ESCALATION
-============================================================
+------------------------------------------------------------
 
 When the escalation tool successfully creates a request:
 
@@ -289,9 +352,17 @@ Tell the caller:
 Do NOT promise an immediate human response unless you know
 that a human is immediately available.
 
-============================================================
+Example:
+
+"Your request has been created successfully. Your reference
+number is [REFERENCE ID]. It is currently open for human review.
+A healthcare support person can review the request and follow up
+using your preferred method."
+
+
+------------------------------------------------------------
 NORMAL CONVERSATIONS
-============================================================
+------------------------------------------------------------
 
 Do NOT create a human-help request for ordinary symptoms.
 
@@ -304,6 +375,9 @@ For example:
 
 These should normally receive safe educational guidance.
 
+Do not unnecessarily escalate normal conversations.
+
+
 ============================================================
 DAY 5 HEALTH TOOL
 ============================================================
@@ -313,12 +387,20 @@ You have access to a healthcare tool that can:
 1. Assess general urgency based on symptoms.
 2. Look up healthcare facility information.
 
-Use the tool when the user needs practical healthcare
-guidance or asks for a nearby healthcare facility.
+Use the tool when the user needs practical healthcare guidance
+or asks for a nearby healthcare facility.
 
 The tool provides general triage information.
 
 It does NOT provide a medical diagnosis.
+
+When using tool results:
+
+- Explain the result simply.
+- Do not exaggerate urgency.
+- Do not invent facility information.
+- Clearly distinguish general guidance from professional diagnosis.
+
 
 ============================================================
 CALLER MEMORY
@@ -346,6 +428,7 @@ Never ask for:
 - Bank details
 - Credit card information
 
+
 ============================================================
 MEDICATION REMINDERS
 ============================================================
@@ -364,8 +447,8 @@ Then ask:
 
 If the user confirms that they took it:
 
-"Great, thank you for confirming. Please continue following
-the medication schedule provided by your healthcare professional.
+"Great, thank you for confirming. Please continue following the
+medication schedule provided by your healthcare professional.
 Take care."
 
 If the user has not taken it or forgot:
@@ -376,6 +459,7 @@ what to do after missing a dose, please contact your doctor
 or pharmacist."
 
 Never recommend doubling a dose.
+
 
 ============================================================
 OPT-OUT
@@ -392,13 +476,21 @@ If the user says:
 
 Respect the request immediately.
 
+Respond:
+
+"Absolutely. I understand. I won't continue this reminder call.
+Thank you."
+
+Do not argue or persuade.
+
+
 ============================================================
 IDENTITY
 ============================================================
 
 If asked who you are:
 
-"I'm MediSathi, an AI healthcare assistant."
+"I'm HealthAccess, an AI healthcare assistant."
 
 If asked whether you are a doctor:
 
@@ -406,16 +498,6 @@ If asked whether you are a doctor:
 health information, but I'm not a doctor and I can't replace
 professional medical advice."
 
-============================================================
-DAY 8 — CALL SUCCESS
-============================================================
-
-A call should be considered successful when:
-
-- The caller receives meaningful safe healthcare guidance, OR
-- A human-help escalation is successfully created.
-
-Do not expose analytics information to the caller.
 
 ============================================================
 FINAL RULE
@@ -443,6 +525,7 @@ class Assistant(Agent):
         instructions = SYSTEM_PROMPT
 
         if memory_context:
+
             instructions += f"""
 
 ============================================================
@@ -474,30 +557,38 @@ END CALLER MEMORY
         context: RunContext,
         user_id: str | None = None,
     ):
-        """Look up saved caller information."""
+        """
+        Look up saved caller information.
+        """
 
         if not user_id:
+
             try:
                 userdata = context.userdata
             except Exception:
                 userdata = None
 
             if isinstance(userdata, dict):
-                user_id = userdata.get("caller_id")
+                user_id = userdata.get(
+                    "caller_id"
+                )
 
         if not user_id:
+
             return {
                 "found": False,
-                "reason": "missing_user_id",
+                "reason": "missing user_id",
             }
 
         try:
-            record = db_lookup_caller(
+
+            record = lookup_caller(
                 DB_CONN,
                 user_id,
             )
 
         except Exception:
+
             logger.exception(
                 "Caller lookup failed."
             )
@@ -508,6 +599,7 @@ END CALLER MEMORY
             }
 
         if not record:
+
             return {
                 "found": False,
                 "user_id": user_id,
@@ -531,25 +623,32 @@ END CALLER MEMORY
         language_preference: str | None = None,
         facts: dict[str, str] | None = None,
     ):
-        """Save safe caller information."""
+        """
+        Save safe caller information.
+        """
 
         if not user_id:
+
             try:
                 userdata = context.userdata
             except Exception:
                 userdata = None
 
             if isinstance(userdata, dict):
-                user_id = userdata.get("caller_id")
+                user_id = userdata.get(
+                    "caller_id"
+                )
 
         if not user_id:
+
             return {
                 "saved": False,
-                "reason": "missing_user_id",
+                "reason": "missing user_id",
             }
 
         try:
-            record = db_save_caller(
+
+            record = save_caller(
                 DB_CONN,
                 user_id=user_id,
                 name=name,
@@ -568,6 +667,7 @@ END CALLER MEMORY
             }
 
         except Exception:
+
             logger.exception(
                 "Caller memory save failed."
             )
@@ -593,9 +693,15 @@ END CALLER MEMORY
         preferred_follow_up: str,
         permission_confirmed: bool = False,
     ):
-        """Create a human-help request only after permission."""
+        """
+        Create a human-help request.
+
+        This tool must only be called after the caller has
+        explicitly given permission.
+        """
 
         if permission_confirmed is not True:
+
             logger.warning(
                 "Escalation blocked: caller permission missing."
             )
@@ -611,12 +717,15 @@ END CALLER MEMORY
             }
 
         caller_id = ""
+
         caller_name = ""
 
         try:
+
             userdata = context.userdata
 
             if isinstance(userdata, dict):
+
                 caller_id = (
                     userdata.get("caller_id")
                     or ""
@@ -628,11 +737,13 @@ END CALLER MEMORY
                 )
 
         except Exception:
+
             logger.exception(
                 "Unable to read caller information."
             )
 
         if not issue_type.strip():
+
             return {
                 "success": False,
                 "created": False,
@@ -640,6 +751,7 @@ END CALLER MEMORY
             }
 
         if not summary.strip():
+
             return {
                 "success": False,
                 "created": False,
@@ -647,6 +759,7 @@ END CALLER MEMORY
             }
 
         if not agent_checked.strip():
+
             return {
                 "success": False,
                 "created": False,
@@ -654,6 +767,7 @@ END CALLER MEMORY
             }
 
         try:
+
             result = create_escalation(
                 ESCALATION_CONN,
                 caller_id=caller_id,
@@ -676,6 +790,7 @@ END CALLER MEMORY
             return result
 
         except Exception:
+
             logger.exception(
                 "Failed to create human-help request."
             )
@@ -697,7 +812,10 @@ END CALLER MEMORY
         symptoms: str,
         location: str | None = None,
     ):
-        """Assess general urgency and find facility information."""
+        """
+        Assess general urgency from symptoms and find
+        healthcare facility information.
+        """
 
         del context
 
@@ -708,6 +826,7 @@ END CALLER MEMORY
         )
 
         if not symptoms or not symptoms.strip():
+
             return {
                 "success": False,
                 "error": "missing_symptoms",
@@ -715,8 +834,12 @@ END CALLER MEMORY
             }
 
         try:
+
             symptoms_clean = symptoms.strip()
-            symptoms_lower = symptoms_clean.lower()
+
+            symptoms_lower = (
+                symptoms_clean.lower()
+            )
 
             triage_level, triage_reason = (
                 self._determine_triage(
@@ -746,7 +869,9 @@ END CALLER MEMORY
                 ),
             }
 
-            result.update(facility_result)
+            result.update(
+                facility_result
+            )
 
             logger.info(
                 "HEALTH TOOL RESULT | %s",
@@ -756,6 +881,7 @@ END CALLER MEMORY
             return result
 
         except Exception:
+
             logger.exception(
                 "Health tool failed."
             )
@@ -838,7 +964,9 @@ END CALLER MEMORY
         ]
 
         for keyword in emergency_keywords:
+
             if keyword in symptoms:
+
                 return (
                     "Emergency care",
                     (
@@ -849,7 +977,9 @@ END CALLER MEMORY
                 )
 
         for keyword in prompt_keywords:
+
             if keyword in symptoms:
+
                 return (
                     "Prompt medical consultation",
                     (
@@ -859,7 +989,11 @@ END CALLER MEMORY
                     ),
                 )
 
-        if "fever" in symptoms and "cough" in symptoms:
+        if (
+            "fever" in symptoms
+            and "cough" in symptoms
+        ):
+
             return (
                 "Prompt medical consultation",
                 (
@@ -869,7 +1003,9 @@ END CALLER MEMORY
             )
 
         for keyword in routine_keywords:
+
             if keyword in symptoms:
+
                 return (
                     "Routine healthcare consultation",
                     (
@@ -899,9 +1035,12 @@ END CALLER MEMORY
         location: str | None,
     ) -> dict:
 
-        facilities = self._load_local_facilities()
+        facilities = (
+            self._load_local_facilities()
+        )
 
         if not facilities:
+
             return {
                 "facility_available": False,
                 "facility_message": (
@@ -928,6 +1067,7 @@ END CALLER MEMORY
             if location_result.get(
                 "facility_available"
             ):
+
                 return location_result
 
         default_facility = facilities[0]
@@ -962,9 +1102,12 @@ END CALLER MEMORY
     # LOAD FACILITY DATASET
     # ========================================================
 
-    def _load_local_facilities(self) -> list[dict]:
+    def _load_local_facilities(
+        self,
+    ) -> list[dict]:
 
         try:
+
             with open(
                 FACILITIES_FILE,
                 "r",
@@ -974,28 +1117,36 @@ END CALLER MEMORY
                 data = json.load(handle)
 
         except FileNotFoundError:
+
             logger.warning(
                 "Facility dataset not found: %s",
                 FACILITIES_FILE,
             )
+
             return []
 
         except json.JSONDecodeError:
+
             logger.exception(
                 "Facility dataset contains invalid JSON."
             )
+
             return []
 
         except OSError:
+
             logger.exception(
                 "Unable to read facility dataset."
             )
+
             return []
 
         if not isinstance(data, list):
+
             logger.warning(
                 "Facility dataset must contain a JSON list."
             )
+
             return []
 
         return [
@@ -1015,6 +1166,7 @@ END CALLER MEMORY
     ) -> dict:
 
         try:
+
             query = urllib.parse.urlencode(
                 {
                     "q": location,
@@ -1023,12 +1175,14 @@ END CALLER MEMORY
                 }
             )
 
-            url = f"{NOMINATIM_SEARCH_URL}?{query}"
+            url = (
+                f"{NOMINATIM_SEARCH_URL}?{query}"
+            )
 
             request = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "MediSathi/1.0"
+                    "User-Agent": "HealthAccess/1.0"
                 },
             )
 
@@ -1042,12 +1196,15 @@ END CALLER MEMORY
                     .decode("utf-8")
                 )
 
-            places = json.loads(raw_response)
+            places = json.loads(
+                raw_response
+            )
 
             if (
                 not isinstance(places, list)
                 or not places
             ):
+
                 return {
                     "facility_available": False,
                     "facility_message": (
@@ -1077,7 +1234,10 @@ END CALLER MEMORY
                 if not region:
                     continue
 
-                if region.lower() in display_name:
+                if (
+                    region.lower()
+                    in display_name
+                ):
 
                     return {
                         "facility_available": True,
@@ -1199,10 +1359,8 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess):
 
-    proc.userdata["vad"] = silero.VAD.load()
-
-    logger.info(
-        "VAD prewarmed successfully."
+    proc.userdata["vad"] = (
+        silero.VAD.load()
     )
 
 
@@ -1224,22 +1382,9 @@ async def my_agent(
         "room": ctx.room.name
     }
 
-    logger.info(
-        "=================================================="
-    )
-
-    logger.info(
-        "LIVEKIT SESSION STARTED | room=%s",
-        ctx.room.name,
-    )
-
-    logger.info(
-        "=================================================="
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # JOB METADATA
-    # ========================================================
+    # --------------------------------------------------------
 
     dial_info: dict = {}
 
@@ -1259,6 +1404,7 @@ async def my_agent(
                 parsed_metadata,
                 dict,
             ):
+
                 dial_info = parsed_metadata
 
     except json.JSONDecodeError:
@@ -1268,75 +1414,33 @@ async def my_agent(
             ctx.job.metadata,
         )
 
-    # ========================================================
-    # OUTBOUND CALL
-    # ========================================================
+    # --------------------------------------------------------
+    # OUTBOUND CALL INFORMATION
+    # --------------------------------------------------------
 
     phone_number = dial_info.get(
         "phone_number"
     )
 
-    is_outbound = bool(phone_number)
-
-    # ========================================================
-    # DAY 8 ANALYTICS
-    # ========================================================
-
-    analytics_call_id = ctx.room.name
-
-    call_channel = (
-        "sip"
-        if is_outbound
-        else "browser"
+    is_outbound = bool(
+        phone_number
     )
 
     logger.info(
-        "DAY 8 ANALYTICS | Preparing call | "
-        "id=%s | channel=%s",
-        analytics_call_id,
-        call_channel,
+        "Session started | outbound=%s | phone=%s",
+        is_outbound,
+        phone_number,
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # CONNECT TO ROOM
-    # ========================================================
+    # --------------------------------------------------------
 
     await ctx.connect()
 
     # --------------------------------------------------------
-    # START CALL RECORD AFTER ROOM IS LIVE
-    # --------------------------------------------------------
-
-    try:
-
-        start_call(
-            ANALYTICS_CONN,
-            call_id=analytics_call_id,
-            channel=call_channel,
-        )
-
-        logger.info(
-            "DAY 8 ANALYTICS | CALL STARTED | "
-            "id=%s | channel=%s | status=active | successful=0",
-            analytics_call_id,
-            call_channel,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "DAY 8 ANALYTICS | "
-            "FAILED TO RECORD CALL START"
-        )
-
-    logger.info(
-        "Connected to LiveKit room: %s",
-        ctx.room.name,
-    )
-
-    # ========================================================
     # FIND PARTICIPANT
-    # ========================================================
+    # --------------------------------------------------------
 
     caller_metadata: dict[str, str] = {}
 
@@ -1376,9 +1480,9 @@ async def my_agent(
             "Unable to resolve caller identity."
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # CALLER MEMORY
-    # ========================================================
+    # --------------------------------------------------------
 
     memory_context = ""
 
@@ -1394,7 +1498,7 @@ async def my_agent(
 
         try:
 
-            saved_caller = db_lookup_caller(
+            saved_caller = lookup_caller(
                 DB_CONN,
                 caller_id,
             )
@@ -1415,10 +1519,7 @@ async def my_agent(
                 )
 
                 saved_facts = (
-                    saved_caller.get(
-                        "facts",
-                        {},
-                    )
+                    saved_caller.get("facts", {})
                     or {}
                 )
 
@@ -1457,17 +1558,17 @@ async def my_agent(
                 "Failed to load caller memory."
             )
 
-    # ========================================================
+    # --------------------------------------------------------
     # CREATE ASSISTANT
-    # ========================================================
+    # --------------------------------------------------------
 
     assistant = Assistant(
         memory_context=memory_context
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # AGENT SESSION
-    # ========================================================
+    # --------------------------------------------------------
 
     session = AgentSession(
 
@@ -1498,9 +1599,9 @@ async def my_agent(
         preemptive_generation=True,
     )
 
-    # ========================================================
-    # START AGENT SESSION
-    # ========================================================
+    # --------------------------------------------------------
+    # START SESSION
+    # --------------------------------------------------------
 
     await session.start(
         agent=assistant,
@@ -1528,57 +1629,16 @@ async def my_agent(
         ),
     )
 
-    logger.info(
-        "Agent session started successfully."
-    )
-
-    # ========================================================
-    # DAY 8 ANALYTICS — FINISH CALL
-    # ========================================================
-
-    async def record_call_outcome():
-
-        logger.info(
-            "DAY 8 ANALYTICS | "
-            "Shutdown callback triggered | id=%s",
-            analytics_call_id,
-        )
-
-        try:
-
-            finish_call(
-                ANALYTICS_CONN,
-                call_id=analytics_call_id,
-                successful=True,
-            )
-
-            logger.info(
-                "DAY 8 ANALYTICS | CALL FINISHED | "
-                "id=%s | successful=True",
-                analytics_call_id,
-            )
-
-        except Exception:
-
-            logger.exception(
-                "DAY 8 ANALYTICS | "
-                "FAILED TO RECORD CALL OUTCOME"
-            )
-
-    ctx.add_shutdown_callback(
-        record_call_outcome
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # OUTBOUND CALL GREETING
-    # ========================================================
+    # --------------------------------------------------------
 
     if is_outbound:
 
         await session.generate_reply(
             instructions=(
                 "Start the outbound medication reminder "
-                "call now. Clearly introduce MediSathi, "
+                "call now. Clearly introduce HealthAccess, "
                 "explain that this is a scheduled medication "
                 "reminder, tell the user they can opt out "
                 "of future reminder calls, and then ask "
@@ -1593,4 +1653,5 @@ async def my_agent(
 # ============================================================
 
 if __name__ == "__main__":
+
     cli.run_app(server)
