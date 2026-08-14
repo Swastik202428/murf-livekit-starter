@@ -2,7 +2,7 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -29,23 +29,24 @@ from livekit.plugins import (
 )
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from .caller_memory import (
-    init_db,
-    lookup_caller as db_lookup_caller,
-    save_caller as db_save_caller,
-)
-
-from .escalation import (
-    init_escalation_db,
-    create_escalation,
-)
-
 from .call_analytics import (
+    finish_call,
     init_analytics_db,
     start_call,
-    finish_call,
 )
-
+from .caller_memory import (
+    init_db,
+)
+from .caller_memory import (
+    lookup_caller as db_lookup_caller,
+)
+from .caller_memory import (
+    save_caller as db_save_caller,
+)
+from .escalation import (
+    create_escalation,
+    init_escalation_db,
+)
 
 # ============================================================
 # LOGGING
@@ -66,9 +67,7 @@ load_dotenv(BASE_DIR / ".env")
 DATA_DIR = BASE_DIR / "data"
 FACILITIES_FILE = DATA_DIR / "health_facilities.json"
 
-NOMINATIM_SEARCH_URL = (
-    "https://nominatim.openstreetmap.org/search"
-)
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 
 
 # ============================================================
@@ -418,6 +417,41 @@ A call should be considered successful when:
 Do not expose analytics information to the caller.
 
 ============================================================
+DAY 9 — SPECIALIST HANDOFF
+============================================================
+
+You have access to a clinic and appointment specialist for
+specific healthcare facility and appointment-related requests.
+
+Transfer to the specialist ONLY if the user specifically needs:
+
+- Help finding a clinic or healthcare facility
+- Help choosing between healthcare facilities
+- Clinic location or facility information
+- Appointment-related assistance
+- Help deciding where to seek or book an appointment
+
+DO NOT transfer for:
+
+- General health questions
+- Symptom questions or assessment
+- Medication-related questions
+- Health education requests
+- Triage or emergency guidance
+- Diagnosis requests
+- Human help escalation (use the human help tool instead)
+
+If the user's request requires specialist help:
+
+1. Clearly tell the user: "I'll connect you to our Clinic and
+Appointment Specialist."
+2. Use the transfer_to_clinic_specialist tool.
+3. Wait for the tool to complete successfully.
+
+Before transferring, ensure the user explicitly needs clinic or
+appointment help, not general healthcare guidance.
+
+============================================================
 FINAL RULE
 ============================================================
 
@@ -430,11 +464,412 @@ Recommend contacting an appropriate healthcare professional.
 
 
 # ============================================================
+# CLINIC APPOINTMENT SPECIALIST PROMPT
+# ============================================================
+
+CLINIC_SPECIALIST_PROMPT = """
+You are the HealthAccess Clinic and Appointment Specialist.
+
+Your only responsibility is helping users with clinics,
+healthcare facilities, and appointments.
+
+You speak in a professional male voice (Arjun).
+
+============================================================
+YOUR ROLE
+============================================================
+
+You help users:
+
+1. Find suitable clinics or healthcare facilities.
+2. Understand clinic and facility options.
+3. Choose a facility based on location and specialty.
+4. Get information about healthcare services.
+5. Arrange or understand appointment processes.
+6. Understand facility hours and location.
+
+============================================================
+WHAT YOU ARE NOT
+============================================================
+
+You are NOT a doctor or healthcare professional.
+
+You must NEVER:
+
+- Diagnose medical conditions.
+- Prescribe medication.
+- Provide definitive medical treatment.
+- Replace professional medical advice.
+- Give clinical recommendations.
+- Assess symptoms.
+
+If the user needs medical advice, symptom assessment, or
+health guidance, tell them clearly:
+
+"This question is about general health guidance. Let me help
+by connecting you with the right resources."
+
+============================================================
+PERSONALITY
+============================================================
+
+Be:
+
+- Friendly and approachable
+- Calm and patient
+- Professional and helpful
+- Concise and clear
+- Natural in conversation
+
+============================================================
+LANGUAGE
+============================================================
+
+Speak naturally in the language the user is using.
+
+If they speak English: Respond in English.
+If they speak Hindi: Respond naturally in Hindi.
+If they speak Hinglish: Respond in Hinglish.
+
+============================================================
+IMPORTANT RULES
+============================================================
+
+1. Do NOT ask the user to repeat their original request.
+2. Do NOT ask questions like "What was your question?"
+3. Do NOT ask "Can you explain everything again?"
+4. The user has already told me their request.
+5. Continue helping from where they left off.
+6. Only ask for missing information.
+7. Be empathetic to their healthcare access concerns.
+
+============================================================
+IF USER ASKS MEDICAL QUESTIONS
+============================================================
+
+If the user asks about symptoms, diagnosis, or medical advice:
+
+Do NOT answer medical questions.
+
+Instead, gently guide them back:
+
+"That sounds like a medical question. I'm focused on helping
+with clinics and appointments. For health guidance, please ask
+MediSathi directly."
+
+============================================================
+EXAMPLE SCENARIO
+============================================================
+
+User (to HealthAccess): "I need to find a clinic for a
+general checkup near me."
+
+HealthAccess: "I'll connect you to our Clinic and Appointment
+Specialist."
+
+[Handoff occurs, I take over]
+
+Me (Specialist): "Hello, I'm the Clinic and Appointment
+Specialist. I already know you need a clinic for a general
+checkup. Which city or area are you in?"
+
+User: "Bengaluru."
+
+Me: "Great! I can help you find a clinic in Bengaluru.
+Are there any specific preferences, like a nearby area?"
+
+[Continue assisting]
+
+============================================================
+CALLER MEMORY
+============================================================
+
+Use saved caller information when relevant.
+
+Never invent information.
+
+Use only what was shared in the conversation.
+
+============================================================
+FINAL RULE
+============================================================
+
+Always prioritize the user's needs.
+
+Focus on finding the right healthcare facility.
+
+Be helpful, professional, and caring.
+"""
+
+
+# ============================================================
+# CLINIC APPOINTMENT AGENT
+# ============================================================
+
+
+class ClinicAppointmentAgent(Agent):
+    """
+    Specialist agent for clinic and appointment-related requests.
+
+    This agent handles:
+    - Finding healthcare facilities
+    - Helping users choose clinics
+    - Providing facility information
+    - Appointment assistance
+
+    It does NOT handle medical diagnosis or health advice.
+    """
+
+    def __init__(
+        self,
+        memory_context: str = "",
+        voice_name: str = "Arjun",
+    ) -> None:
+
+        self.voice_name = voice_name
+
+        instructions = CLINIC_SPECIALIST_PROMPT
+
+        if memory_context:
+            instructions += f"""
+
+============================================================
+CURRENT CALLER MEMORY
+============================================================
+
+Use the following saved caller information only when relevant.
+
+Do not invent additional information.
+
+{memory_context}
+
+============================================================
+END CALLER MEMORY
+============================================================
+"""
+
+        super().__init__(instructions=instructions)
+
+    # ========================================================
+    # FACILITY LOOKUP
+    # ========================================================
+
+    def _load_local_facilities(self) -> list[dict]:
+        """Load healthcare facility dataset."""
+
+        try:
+            with open(
+                FACILITIES_FILE,
+                encoding="utf-8",
+            ) as handle:
+                data = json.load(handle)
+
+        except FileNotFoundError:
+            logger.warning(
+                "Facility dataset not found: %s",
+                FACILITIES_FILE,
+            )
+            return []
+
+        except json.JSONDecodeError:
+            logger.exception("Facility dataset contains invalid JSON.")
+            return []
+
+        except OSError:
+            logger.exception("Unable to read facility dataset.")
+            return []
+
+        if not isinstance(data, list):
+            logger.warning("Facility dataset must contain a JSON list.")
+            return []
+
+        return [item for item in data if isinstance(item, dict)]
+
+    def _lookup_facility_by_location(
+        self,
+        location: str,
+        facilities: list[dict],
+    ) -> dict:
+        """Find healthcare facility by location."""
+
+        try:
+            query = urllib.parse.urlencode(
+                {
+                    "q": location,
+                    "format": "json",
+                    "limit": 1,
+                }
+            )
+
+            url = f"{NOMINATIM_SEARCH_URL}?{query}"
+
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "MediSathi/1.0"},
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=8,
+            ) as response:
+                raw_response = response.read().decode("utf-8")
+
+            places = json.loads(raw_response)
+
+            if not isinstance(places, list) or not places:
+                return {
+                    "facility_available": False,
+                    "facility_message": ("No location information was found."),
+                    "data_source": ("OpenStreetMap Nominatim"),
+                    "data_as_of": (date.today().isoformat()),
+                }
+
+            display_name = places[0].get("display_name", "").lower()
+
+            for facility in facilities:
+                region = str(facility.get("region", "")).strip()
+
+                if not region:
+                    continue
+
+                if region.lower() in display_name:
+                    return {
+                        "facility_available": True,
+                        "facility_name": facility.get(
+                            "name",
+                            "Healthcare facility",
+                        ),
+                        "facility_address": facility.get(
+                            "address",
+                            "Address unavailable",
+                        ),
+                        "distance_km": facility.get(
+                            "distance_km",
+                            5.0,
+                        ),
+                        "facility_message": (
+                            f"Facility information found for {location}."
+                        ),
+                        "data_source": (
+                            "OpenStreetMap Nominatim + HealthAccess local dataset"
+                        ),
+                        "data_as_of": (date.today().isoformat()),
+                    }
+
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+        ) as exc:
+            logger.warning(
+                "Location lookup failed: %s",
+                exc,
+            )
+
+            return {
+                "facility_available": False,
+                "facility_message": ("The location lookup is temporarily unavailable."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
+            }
+
+        except json.JSONDecodeError:
+            logger.exception("Invalid response from location service.")
+
+            return {
+                "facility_available": False,
+                "facility_message": ("The location service returned invalid data."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
+            }
+
+        except Exception:
+            logger.exception("Unexpected location lookup error.")
+
+            return {
+                "facility_available": False,
+                "facility_message": ("The location lookup is temporarily unavailable."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
+            }
+
+        return {
+            "facility_available": False,
+            "facility_message": (
+                "No matching healthcare facility was found for the given location."
+            ),
+            "data_source": ("HealthAccess local dataset"),
+            "data_as_of": (date.today().isoformat()),
+        }
+
+    @function_tool
+    async def find_healthcare_facility(
+        self,
+        context: RunContext,
+        location: str | None = None,
+    ):
+        """Find healthcare facilities by location."""
+
+        del context
+
+        logger.info(
+            "CLINIC SPECIALIST | find_healthcare_facility | location=%s",
+            location,
+        )
+
+        facilities = self._load_local_facilities()
+
+        if not facilities:
+            return {
+                "success": False,
+                "error": "no_facilities_available",
+                "message": ("No healthcare facility data is currently available."),
+            }
+
+        if location and location.strip():
+            location_result = self._lookup_facility_by_location(
+                location.strip(),
+                facilities,
+            )
+
+            if location_result.get("facility_available"):
+                return {
+                    "success": True,
+                    **location_result,
+                }
+
+        default_facility = facilities[0]
+
+        return {
+            "success": True,
+            "facility_available": True,
+            "facility_name": default_facility.get(
+                "name",
+                "Healthcare facility",
+            ),
+            "facility_address": default_facility.get(
+                "address",
+                "Address unavailable",
+            ),
+            "distance_km": default_facility.get(
+                "distance_km",
+                0.0,
+            ),
+            "facility_message": (
+                "Facility information is based on the "
+                "HealthAccess local reference dataset."
+            ),
+            "data_source": ("HealthAccess local dataset"),
+            "data_as_of": (date.today().isoformat()),
+        }
+
+
+# ============================================================
 # ASSISTANT
 # ============================================================
 
-class Assistant(Agent):
 
+class Assistant(Agent):
     def __init__(
         self,
         memory_context: str = "",
@@ -460,9 +895,7 @@ END CALLER MEMORY
 ============================================================
 """
 
-        super().__init__(
-            instructions=instructions
-        )
+        super().__init__(instructions=instructions)
 
     # ========================================================
     # CALLER MEMORY TOOL
@@ -498,9 +931,7 @@ END CALLER MEMORY
             )
 
         except Exception:
-            logger.exception(
-                "Caller lookup failed."
-            )
+            logger.exception("Caller lookup failed.")
 
             return {
                 "found": False,
@@ -568,9 +999,7 @@ END CALLER MEMORY
             }
 
         except Exception:
-            logger.exception(
-                "Caller memory save failed."
-            )
+            logger.exception("Caller memory save failed.")
 
             return {
                 "saved": False,
@@ -596,9 +1025,7 @@ END CALLER MEMORY
         """Create a human-help request only after permission."""
 
         if permission_confirmed is not True:
-            logger.warning(
-                "Escalation blocked: caller permission missing."
-            )
+            logger.warning("Escalation blocked: caller permission missing.")
 
             return {
                 "success": False,
@@ -617,20 +1044,12 @@ END CALLER MEMORY
             userdata = context.userdata
 
             if isinstance(userdata, dict):
-                caller_id = (
-                    userdata.get("caller_id")
-                    or ""
-                )
+                caller_id = userdata.get("caller_id") or ""
 
-                caller_name = (
-                    userdata.get("caller_name")
-                    or ""
-                )
+                caller_name = userdata.get("caller_name") or ""
 
         except Exception:
-            logger.exception(
-                "Unable to read caller information."
-            )
+            logger.exception("Unable to read caller information.")
 
         if not issue_type.strip():
             return {
@@ -667,8 +1086,7 @@ END CALLER MEMORY
             )
 
             logger.info(
-                "HUMAN ESCALATION CREATED | "
-                "reference=%s | urgency=%s",
+                "HUMAN ESCALATION CREATED | reference=%s | urgency=%s",
                 result.get("reference_id"),
                 result.get("urgency"),
             )
@@ -676,9 +1094,7 @@ END CALLER MEMORY
             return result
 
         except Exception:
-            logger.exception(
-                "Failed to create human-help request."
-            )
+            logger.exception("Failed to create human-help request.")
 
             return {
                 "success": False,
@@ -718,17 +1134,9 @@ END CALLER MEMORY
             symptoms_clean = symptoms.strip()
             symptoms_lower = symptoms_clean.lower()
 
-            triage_level, triage_reason = (
-                self._determine_triage(
-                    symptoms_lower
-                )
-            )
+            triage_level, triage_reason = self._determine_triage(symptoms_lower)
 
-            facility_result = (
-                self._lookup_nearest_facility(
-                    location
-                )
-            )
+            facility_result = self._lookup_nearest_facility(location)
 
             result = {
                 "success": True,
@@ -756,9 +1164,7 @@ END CALLER MEMORY
             return result
 
         except Exception:
-            logger.exception(
-                "Health tool failed."
-            )
+            logger.exception("Health tool failed.")
 
             return {
                 "success": False,
@@ -767,12 +1173,8 @@ END CALLER MEMORY
                     "The HealthAccess health information "
                     "source is temporarily unavailable."
                 ),
-                "data_source": (
-                    "HealthAccess local dataset"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "data_source": ("HealthAccess local dataset"),
+                "data_as_of": (date.today().isoformat()),
             }
 
     # ========================================================
@@ -904,30 +1306,18 @@ END CALLER MEMORY
         if not facilities:
             return {
                 "facility_available": False,
-                "facility_message": (
-                    "No local healthcare facility "
-                    "data is available."
-                ),
-                "data_source": (
-                    "HealthAccess local dataset"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "facility_message": ("No local healthcare facility data is available."),
+                "data_source": ("HealthAccess local dataset"),
+                "data_as_of": (date.today().isoformat()),
             }
 
         if location and location.strip():
-
-            location_result = (
-                self._lookup_facility_by_location(
-                    location.strip(),
-                    facilities,
-                )
+            location_result = self._lookup_facility_by_location(
+                location.strip(),
+                facilities,
             )
 
-            if location_result.get(
-                "facility_available"
-            ):
+            if location_result.get("facility_available"):
                 return location_result
 
         default_facility = facilities[0]
@@ -950,12 +1340,8 @@ END CALLER MEMORY
                 "Facility information is based on the "
                 "HealthAccess local reference dataset."
             ),
-            "data_source": (
-                "HealthAccess local dataset"
-            ),
-            "data_as_of": (
-                date.today().isoformat()
-            ),
+            "data_source": ("HealthAccess local dataset"),
+            "data_as_of": (date.today().isoformat()),
         }
 
     # ========================================================
@@ -967,10 +1353,8 @@ END CALLER MEMORY
         try:
             with open(
                 FACILITIES_FILE,
-                "r",
                 encoding="utf-8",
             ) as handle:
-
                 data = json.load(handle)
 
         except FileNotFoundError:
@@ -981,28 +1365,18 @@ END CALLER MEMORY
             return []
 
         except json.JSONDecodeError:
-            logger.exception(
-                "Facility dataset contains invalid JSON."
-            )
+            logger.exception("Facility dataset contains invalid JSON.")
             return []
 
         except OSError:
-            logger.exception(
-                "Unable to read facility dataset."
-            )
+            logger.exception("Unable to read facility dataset.")
             return []
 
         if not isinstance(data, list):
-            logger.warning(
-                "Facility dataset must contain a JSON list."
-            )
+            logger.warning("Facility dataset must contain a JSON list.")
             return []
 
-        return [
-            item
-            for item in data
-            if isinstance(item, dict)
-        ]
+        return [item for item in data if isinstance(item, dict)]
 
     # ========================================================
     # LOCATION LOOKUP
@@ -1027,58 +1401,34 @@ END CALLER MEMORY
 
             request = urllib.request.Request(
                 url,
-                headers={
-                    "User-Agent": "MediSathi/1.0"
-                },
+                headers={"User-Agent": "MediSathi/1.0"},
             )
 
             with urllib.request.urlopen(
                 request,
                 timeout=8,
             ) as response:
-
-                raw_response = (
-                    response.read()
-                    .decode("utf-8")
-                )
+                raw_response = response.read().decode("utf-8")
 
             places = json.loads(raw_response)
 
-            if (
-                not isinstance(places, list)
-                or not places
-            ):
+            if not isinstance(places, list) or not places:
                 return {
                     "facility_available": False,
-                    "facility_message": (
-                        "No location information "
-                        "was found."
-                    ),
-                    "data_source": (
-                        "OpenStreetMap Nominatim"
-                    ),
-                    "data_as_of": (
-                        date.today().isoformat()
-                    ),
+                    "facility_message": ("No location information was found."),
+                    "data_source": ("OpenStreetMap Nominatim"),
+                    "data_as_of": (date.today().isoformat()),
                 }
 
-            display_name = (
-                places[0]
-                .get("display_name", "")
-                .lower()
-            )
+            display_name = places[0].get("display_name", "").lower()
 
             for facility in facilities:
-
-                region = str(
-                    facility.get("region", "")
-                ).strip()
+                region = str(facility.get("region", "")).strip()
 
                 if not region:
                     continue
 
                 if region.lower() in display_name:
-
                     return {
                         "facility_available": True,
                         "facility_name": facility.get(
@@ -1094,16 +1444,12 @@ END CALLER MEMORY
                             5.0,
                         ),
                         "facility_message": (
-                            f"Facility information found "
-                            f"for {location}."
+                            f"Facility information found for {location}."
                         ),
                         "data_source": (
-                            "OpenStreetMap Nominatim + "
-                            "HealthAccess local dataset"
+                            "OpenStreetMap Nominatim + HealthAccess local dataset"
                         ),
-                        "data_as_of": (
-                            date.today().isoformat()
-                        ),
+                        "data_as_of": (date.today().isoformat()),
                     }
 
         except (
@@ -1111,7 +1457,6 @@ END CALLER MEMORY
             URLError,
             TimeoutError,
         ) as exc:
-
             logger.warning(
                 "Location lookup failed: %s",
                 exc,
@@ -1119,71 +1464,188 @@ END CALLER MEMORY
 
             return {
                 "facility_available": False,
-                "facility_message": (
-                    "The location lookup is temporarily "
-                    "unavailable."
-                ),
-                "data_source": (
-                    "OpenStreetMap Nominatim"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "facility_message": ("The location lookup is temporarily unavailable."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
             }
 
         except json.JSONDecodeError:
-
-            logger.exception(
-                "Invalid response from location service."
-            )
+            logger.exception("Invalid response from location service.")
 
             return {
                 "facility_available": False,
-                "facility_message": (
-                    "The location service returned "
-                    "invalid data."
-                ),
-                "data_source": (
-                    "OpenStreetMap Nominatim"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "facility_message": ("The location service returned invalid data."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
             }
 
         except Exception:
-
-            logger.exception(
-                "Unexpected location lookup error."
-            )
+            logger.exception("Unexpected location lookup error.")
 
             return {
                 "facility_available": False,
-                "facility_message": (
-                    "The location lookup is temporarily "
-                    "unavailable."
-                ),
-                "data_source": (
-                    "OpenStreetMap Nominatim"
-                ),
-                "data_as_of": (
-                    date.today().isoformat()
-                ),
+                "facility_message": ("The location lookup is temporarily unavailable."),
+                "data_source": ("OpenStreetMap Nominatim"),
+                "data_as_of": (date.today().isoformat()),
             }
 
         return {
             "facility_available": False,
             "facility_message": (
-                "No matching healthcare facility was "
-                "found for the given location."
+                "No matching healthcare facility was found for the given location."
             ),
-            "data_source": (
-                "HealthAccess local dataset"
-            ),
-            "data_as_of": (
-                date.today().isoformat()
-            ),
+            "data_source": ("HealthAccess local dataset"),
+            "data_as_of": (date.today().isoformat()),
         }
+
+    # ========================================================
+    # DAY 9 SPECIALIST HANDOFF
+    # ========================================================
+
+    @function_tool
+    async def transfer_to_clinic_specialist(
+        self,
+        context: RunContext,
+    ):
+        """
+        Transfer the user to the Clinic and Appointment Specialist.
+
+        Use this tool ONLY when the user explicitly needs:
+        - Help finding a clinic or healthcare facility
+        - Help choosing between healthcare facilities
+        - Clinic information or location details
+        - Appointment-related assistance
+
+        DO NOT use for general health questions, symptom assessment,
+        medication questions, or medical advice.
+        """
+
+        caller_id = ""
+        caller_name = ""
+
+        try:
+            userdata = context.userdata
+
+            if isinstance(userdata, dict):
+                caller_id = userdata.get("caller_id") or ""
+
+                caller_name = userdata.get("caller_name") or ""
+
+        except Exception:
+            logger.exception(
+                "Unable to read caller information for specialist handoff."
+            )
+
+        # Get memory context for specialist
+        memory_context = ""
+
+        if caller_id:
+            try:
+                saved_caller = db_lookup_caller(
+                    DB_CONN,
+                    caller_id,
+                )
+
+                if saved_caller:
+                    saved_name = saved_caller.get("name") or caller_name or "unknown"
+
+                    preferred_language = (
+                        saved_caller.get("language_preference") or "unknown"
+                    )
+
+                    saved_facts = (
+                        saved_caller.get(
+                            "facts",
+                            {},
+                        )
+                        or {}
+                    )
+
+                    memory_context = (
+                        f"Caller name: {saved_name}\n"
+                        f"Preferred language: "
+                        f"{preferred_language}\n"
+                        f"Saved facts: "
+                        f"{json.dumps(saved_facts, ensure_ascii=False)}"
+                    )
+
+            except Exception:
+                logger.exception("Failed to load caller memory for specialist.")
+
+        # Switch agent to specialist mode
+        try:
+            # Create specialist agent with Arjun male voice
+            specialist = ClinicAppointmentAgent(
+                memory_context=memory_context,
+                voice_name="Arjun",
+            )
+
+            logger.info(
+                "DAY 9 SPECIALIST HANDOFF | ClinicAppointmentAgent created | caller=%s | voice=Arjun",
+                caller_id,
+            )
+
+            # Record analytics event for handoff
+            try:
+                # Record handoff event using analytics
+                ANALYTICS_CONN.execute(
+                    """
+                    INSERT INTO calls (
+                        call_id,
+                        timestamp,
+                        channel,
+                        successful,
+                        status
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"{caller_id}_specialist",
+                        datetime.now(timezone.utc).isoformat(),
+                        "voice",
+                        0,
+                        "specialist_handoff",
+                    ),
+                )
+
+                ANALYTICS_CONN.commit()
+
+                logger.info("DAY 9 ANALYTICS | Specialist handoff event recorded")
+
+            except Exception:
+                logger.exception("Failed to record specialist handoff analytics")
+
+            # Tell LLM to switch to specialist instructions
+            # by returning the specialist's prompt for context
+            return {
+                "success": True,
+                "specialist_ready": True,
+                "specialist_type": ("ClinicAppointmentAgent"),
+                "action": "use_specialist_instructions",
+                "message": (
+                    "Specialist agent ready. You are now "
+                    "operating as the Clinic and Appointment "
+                    "Specialist. Greet the user and proceed with "
+                    "finding clinics and facilities."
+                ),
+            }
+
+        except Exception:
+            logger.exception(
+                "DAY 9 SPECIALIST HANDOFF | FAILED TO CREATE SPECIALIST AGENT"
+            )
+
+            return {
+                "success": False,
+                "specialist_ready": False,
+                "error": "specialist_unavailable",
+                "message": (
+                    "I'm unable to connect you to the clinic "
+                    "specialist right now, but I can still help "
+                    "you. What clinic or healthcare facility "
+                    "are you looking for?"
+                ),
+            }
 
 
 # ============================================================
@@ -1197,13 +1659,12 @@ server = AgentServer()
 # PREWARM
 # ============================================================
 
+
 def prewarm(proc: JobProcess):
 
     proc.userdata["vad"] = silero.VAD.load()
 
-    logger.info(
-        "VAD prewarmed successfully."
-    )
+    logger.info("VAD prewarmed successfully.")
 
 
 server.setup_fnc = prewarm
@@ -1213,29 +1674,22 @@ server.setup_fnc = prewarm
 # LIVEKIT SESSION
 # ============================================================
 
-@server.rtc_session(
-    agent_name="my-agent"
-)
+
+@server.rtc_session(agent_name="my-agent")
 async def my_agent(
     ctx: JobContext,
 ):
 
-    ctx.log_context_fields = {
-        "room": ctx.room.name
-    }
+    ctx.log_context_fields = {"room": ctx.room.name}
 
-    logger.info(
-        "=================================================="
-    )
+    logger.info("==================================================")
 
     logger.info(
         "LIVEKIT SESSION STARTED | room=%s",
         ctx.room.name,
     )
 
-    logger.info(
-        "=================================================="
-    )
+    logger.info("==================================================")
 
     # ========================================================
     # JOB METADATA
@@ -1244,16 +1698,10 @@ async def my_agent(
     dial_info: dict = {}
 
     try:
-
-        raw_metadata = (
-            ctx.job.metadata or ""
-        )
+        raw_metadata = ctx.job.metadata or ""
 
         if raw_metadata.strip():
-
-            parsed_metadata = json.loads(
-                raw_metadata
-            )
+            parsed_metadata = json.loads(raw_metadata)
 
             if isinstance(
                 parsed_metadata,
@@ -1262,7 +1710,6 @@ async def my_agent(
                 dial_info = parsed_metadata
 
     except json.JSONDecodeError:
-
         logger.warning(
             "Invalid job metadata: %s",
             ctx.job.metadata,
@@ -1272,9 +1719,7 @@ async def my_agent(
     # OUTBOUND CALL
     # ========================================================
 
-    phone_number = dial_info.get(
-        "phone_number"
-    )
+    phone_number = dial_info.get("phone_number")
 
     is_outbound = bool(phone_number)
 
@@ -1284,15 +1729,10 @@ async def my_agent(
 
     analytics_call_id = ctx.room.name
 
-    call_channel = (
-        "sip"
-        if is_outbound
-        else "browser"
-    )
+    call_channel = "sip" if is_outbound else "browser"
 
     logger.info(
-        "DAY 8 ANALYTICS | Preparing call | "
-        "id=%s | channel=%s",
+        "DAY 8 ANALYTICS | Preparing call | id=%s | channel=%s",
         analytics_call_id,
         call_channel,
     )
@@ -1308,7 +1748,6 @@ async def my_agent(
     # --------------------------------------------------------
 
     try:
-
         start_call(
             ANALYTICS_CONN,
             call_id=analytics_call_id,
@@ -1323,11 +1762,7 @@ async def my_agent(
         )
 
     except Exception:
-
-        logger.exception(
-            "DAY 8 ANALYTICS | "
-            "FAILED TO RECORD CALL START"
-        )
+        logger.exception("DAY 8 ANALYTICS | FAILED TO RECORD CALL START")
 
     logger.info(
         "Connected to LiveKit room: %s",
@@ -1341,23 +1776,13 @@ async def my_agent(
     caller_metadata: dict[str, str] = {}
 
     try:
-
         if is_outbound:
-
-            participant = (
-                await ctx.wait_for_participant(
-                    kind=(
-                        rtc.ParticipantKind
-                        .PARTICIPANT_KIND_SIP
-                    )
-                )
+            participant = await ctx.wait_for_participant(
+                kind=(rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
             )
 
         else:
-
-            participant = (
-                await ctx.wait_for_participant()
-            )
+            participant = await ctx.wait_for_participant()
 
         caller_metadata = {
             "caller_id": participant.identity,
@@ -1371,10 +1796,7 @@ async def my_agent(
         )
 
     except Exception:
-
-        logger.exception(
-            "Unable to resolve caller identity."
-        )
+        logger.exception("Unable to resolve caller identity.")
 
     # ========================================================
     # CALLER MEMORY
@@ -1382,36 +1804,22 @@ async def my_agent(
 
     memory_context = ""
 
-    caller_id = caller_metadata.get(
-        "caller_id"
-    )
+    caller_id = caller_metadata.get("caller_id")
 
-    caller_name = caller_metadata.get(
-        "caller_name"
-    )
+    caller_name = caller_metadata.get("caller_name")
 
     if caller_id:
-
         try:
-
             saved_caller = db_lookup_caller(
                 DB_CONN,
                 caller_id,
             )
 
             if saved_caller:
-
-                saved_name = (
-                    saved_caller.get("name")
-                    or caller_name
-                    or "unknown"
-                )
+                saved_name = saved_caller.get("name") or caller_name or "unknown"
 
                 preferred_language = (
-                    saved_caller.get(
-                        "language_preference"
-                    )
-                    or "unknown"
+                    saved_caller.get("language_preference") or "unknown"
                 )
 
                 saved_facts = (
@@ -1422,12 +1830,7 @@ async def my_agent(
                     or {}
                 )
 
-                last_interaction = (
-                    saved_caller.get(
-                        "last_interaction"
-                    )
-                    or "unknown"
-                )
+                last_interaction = saved_caller.get("last_interaction") or "unknown"
 
                 memory_context = (
                     f"Caller name: {saved_name}\n"
@@ -1445,56 +1848,41 @@ async def my_agent(
                 )
 
             else:
-
                 logger.info(
                     "New caller: %s",
                     caller_id,
                 )
 
         except Exception:
-
-            logger.exception(
-                "Failed to load caller memory."
-            )
+            logger.exception("Failed to load caller memory.")
 
     # ========================================================
     # CREATE ASSISTANT
     # ========================================================
 
-    assistant = Assistant(
-        memory_context=memory_context
-    )
+    assistant = Assistant(memory_context=memory_context)
 
     # ========================================================
     # AGENT SESSION
     # ========================================================
 
     session = AgentSession(
-
         stt=deepgram.STT(
             model="nova-3",
             language="multi",
         ),
-
         llm=google.LLM(
             model="gemini-3.5-flash-lite",
         ),
-
         tts=murf.TTS(
             voice="Anisha",
             style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(
-                min_sentence_len=2
-            ),
-            text_pacing=True,
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=1),
+            text_pacing=False,
         ),
-
         turn_detection=MultilingualModel(),
-
         vad=ctx.proc.userdata["vad"],
-
         userdata=caller_metadata,
-
         preemptive_generation=True,
     )
 
@@ -1506,31 +1894,22 @@ async def my_agent(
         agent=assistant,
         room=ctx.room,
         room_options=room_io.RoomOptions(
-
             audio_input=(
                 room_io.AudioInputOptions(
-
                     noise_cancellation=lambda params: (
                         noise_cancellation.BVCTelephony()
                         if (
                             params.participant.kind
-                            == (
-                                rtc.ParticipantKind
-                                .PARTICIPANT_KIND_SIP
-                            )
+                            == (rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
                         )
                         else noise_cancellation.BVC()
                     ),
-
                 )
             ),
-
         ),
     )
 
-    logger.info(
-        "Agent session started successfully."
-    )
+    logger.info("Agent session started successfully.")
 
     # ========================================================
     # DAY 8 ANALYTICS — FINISH CALL
@@ -1539,13 +1918,11 @@ async def my_agent(
     async def record_call_outcome():
 
         logger.info(
-            "DAY 8 ANALYTICS | "
-            "Shutdown callback triggered | id=%s",
+            "DAY 8 ANALYTICS | Shutdown callback triggered | id=%s",
             analytics_call_id,
         )
 
         try:
-
             finish_call(
                 ANALYTICS_CONN,
                 call_id=analytics_call_id,
@@ -1553,28 +1930,20 @@ async def my_agent(
             )
 
             logger.info(
-                "DAY 8 ANALYTICS | CALL FINISHED | "
-                "id=%s | successful=True",
+                "DAY 8 ANALYTICS | CALL FINISHED | id=%s | successful=True",
                 analytics_call_id,
             )
 
         except Exception:
+            logger.exception("DAY 8 ANALYTICS | FAILED TO RECORD CALL OUTCOME")
 
-            logger.exception(
-                "DAY 8 ANALYTICS | "
-                "FAILED TO RECORD CALL OUTCOME"
-            )
-
-    ctx.add_shutdown_callback(
-        record_call_outcome
-    )
+    ctx.add_shutdown_callback(record_call_outcome)
 
     # ========================================================
     # OUTBOUND CALL GREETING
     # ========================================================
 
     if is_outbound:
-
         await session.generate_reply(
             instructions=(
                 "Start the outbound medication reminder "
